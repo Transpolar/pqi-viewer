@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   MapContainer, TileLayer, CircleMarker, Marker, Popup, Polyline,
-  LayersControl, useMap, useMapEvents,
+  useMap, useMapEvents,
 } from 'react-leaflet';
 import L from 'leaflet';
 import { api } from './api.js';
@@ -19,17 +19,12 @@ function formatPqiGps(lat, lon) {
          `${dLon} ${((aLon - dLon) * 60).toFixed(5)} ${lonHem}`;
 }
 
-// Basemap + overlay options.
+// Basemap definitions.
 //   - "Topographic" = official Kartverket topo (Norway's standard basemap)
 //   - "Satellite"   = Esri World Imagery (free for general use, no API key)
-//   - "Place + road labels" overlay (transparent) toggled separately; turn
-//     it on top of satellite to get a Google-style hybrid view.
-//
-// react-leaflet's <LayersControl.BaseLayer> wants a single Leaflet layer
-// as its child. Earlier versions tried to stuff two TileLayers into one
-// BaseLayer, which the control couldn't handle — it rendered the entry
-// twice and showed only the bottom layer (raw satellite). The fix is to
-// model labels as a separate Overlay.
+//   - "Hybrid"      = Satellite base + Kartverket topo overlay at reduced
+//                     opacity so road lines, tunnel symbols, place names
+//                     and contours are visible on top of the imagery.
 const BASEMAPS = {
   topo: {
     url: 'https://cache.kartverket.no/v1/wmts/1.0.0/topo/default/webmercator/{z}/{y}/{x}.png',
@@ -43,15 +38,10 @@ const BASEMAPS = {
   },
 };
 
-// Transparent label overlay. CartoDB Voyager labels-only — clean place
-// names + road names overlay that works on top of anything. Subdomains
-// {a,b,c,d} for parallel loading.
-const LABEL_OVERLAY = {
-  url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager_only_labels/{z}/{x}/{y}.png',
-  attribution: '© <a href="https://carto.com/attribution">CARTO</a>',
-  subdomains: 'abcd',
-  maxZoom: 19,
-};
+// Opacity for the topo overlay when in hybrid mode. Low enough that the
+// satellite shows through clearly, high enough that road lines and tunnel
+// dashes stay readable.
+const HYBRID_TOPO_OPACITY = 0.55;
 
 delete L.Icon.Default.prototype._getIconUrl;
 L.Icon.Default.mergeOptions({
@@ -120,7 +110,6 @@ function FitBoundsAndPan({ points, selectedId }) {
 // popup briefly shows "looking up…" while the NVDB call completes.
 function ClickProbe() {
   const [click, setClick] = useState(null); // { lat, lon, loading, result, error }
-  const map = useMap();
 
   useMapEvents({
     click: async (e) => {
@@ -191,6 +180,69 @@ function ClickProbe() {
   );
 }
 
+// Custom control panel anchored top-right of the map. Replaces Leaflet's
+// LayersControl so we can:
+//   - present base maps as a clear 3-way radio (topo / satellite / hybrid),
+//   - expose first-class visibility toggles for the row markers.
+// stopPropagation on every event keeps clicks from bubbling into the map
+// (otherwise picking "Satellite" would also trigger a ClickProbe lookup).
+function MapControls({
+  basemap, onBasemapChange,
+  showGps, onShowGpsChange,
+  showRoad, onShowRoadChange,
+}) {
+  const stop = (e) => { e.stopPropagation(); };
+  return (
+    <div
+      className="map-controls"
+      onMouseDown={stop}
+      onDoubleClick={stop}
+      onClick={stop}
+      onWheel={stop}
+      onTouchStart={stop}
+    >
+      <div className="map-controls-section">
+        <div className="map-controls-title">Base map</div>
+        {[
+          ['topo', 'Topographic'],
+          ['satellite', 'Satellite'],
+          ['hybrid', 'Hybrid'],
+        ].map(([value, label]) => (
+          <label key={value} className="map-controls-row">
+            <input
+              type="radio"
+              name="basemap"
+              value={value}
+              checked={basemap === value}
+              onChange={() => onBasemapChange(value)}
+            />
+            <span>{label}</span>
+          </label>
+        ))}
+      </div>
+      <div className="map-controls-section">
+        <div className="map-controls-title">Show</div>
+        <label className="map-controls-row">
+          <input
+            type="checkbox"
+            checked={showGps}
+            onChange={(e) => onShowGpsChange(e.target.checked)}
+          />
+          <span><span className="legend-dot legend-gps" /> Recorded GPS</span>
+        </label>
+        <label className="map-controls-row">
+          <input
+            type="checkbox"
+            checked={showRoad}
+            onChange={(e) => onShowRoadChange(e.target.checked)}
+          />
+          <span><span className="legend-dot legend-road" /> Road marker</span>
+        </label>
+      </div>
+    </div>
+  );
+}
+
 export default function MapView({
   headers, measurements, roadMarkers, selectedId, onSelect,
 }) {
@@ -198,6 +250,10 @@ export default function MapView({
     ? [measurements[0].lat, measurements[0].lon]
     : [64.0, 12.0];
   const initialZoom = measurements.length ? 14 : 5;
+
+  const [basemap, setBasemap] = useState('topo'); // 'topo' | 'satellite' | 'hybrid'
+  const [showGps, setShowGps] = useState(true);
+  const [showRoad, setShowRoad] = useState(true);
 
   const gpsPoints = useMemo(
     () => measurements.map((m) => ({ ...m, compaction: compactionOf(headers, m.cells) })),
@@ -224,91 +280,121 @@ export default function MapView({
   }, [gpsPoints, roadMarkers]);
 
   return (
-    <MapContainer
-      center={initialCenter}
-      zoom={initialZoom}
-      maxZoom={19}
-      scrollWheelZoom
-    >
-      {/* Layer switcher (top-right). Pick ONE base layer; the labels
-          overlay can be toggled independently. Satellite + labels = a
-          hybrid map. */}
-      <LayersControl position="topright">
-        <LayersControl.BaseLayer checked name="Topographic (Kartverket)">
-          <TileLayer url={BASEMAPS.topo.url} attribution={BASEMAPS.topo.attribution} maxZoom={BASEMAPS.topo.maxZoom} />
-        </LayersControl.BaseLayer>
-        <LayersControl.BaseLayer name="Satellite">
-          <TileLayer url={BASEMAPS.satellite.url} attribution={BASEMAPS.satellite.attribution} maxZoom={BASEMAPS.satellite.maxZoom} />
-        </LayersControl.BaseLayer>
-        <LayersControl.Overlay name="Place + road labels (for hybrid view)">
+    <div className="map-pane-inner">
+      <MapContainer
+        center={initialCenter}
+        zoom={initialZoom}
+        maxZoom={19}
+        scrollWheelZoom
+      >
+        {/* Base layer(s). React-leaflet handles add/remove via conditional
+            rendering — switching basemap unmounts the old TileLayer and
+            mounts the new one, which is what we want. */}
+        {basemap === 'topo' && (
           <TileLayer
-            url={LABEL_OVERLAY.url}
-            attribution={LABEL_OVERLAY.attribution}
-            subdomains={LABEL_OVERLAY.subdomains}
-            maxZoom={LABEL_OVERLAY.maxZoom}
+            url={BASEMAPS.topo.url}
+            attribution={BASEMAPS.topo.attribution}
+            maxZoom={BASEMAPS.topo.maxZoom}
           />
-        </LayersControl.Overlay>
-      </LayersControl>
-      <FitBoundsAndPan points={fitPoints} selectedId={selectedId != null ? `g-${selectedId}` : null} />
-      <ClickProbe />
+        )}
+        {basemap === 'satellite' && (
+          <TileLayer
+            url={BASEMAPS.satellite.url}
+            attribution={BASEMAPS.satellite.attribution}
+            maxZoom={BASEMAPS.satellite.maxZoom}
+          />
+        )}
+        {basemap === 'hybrid' && (
+          <>
+            <TileLayer
+              url={BASEMAPS.satellite.url}
+              attribution={BASEMAPS.satellite.attribution}
+              maxZoom={BASEMAPS.satellite.maxZoom}
+            />
+            {/* Topo overlay at reduced opacity so road lines, tunnel
+                dashes, contour lines and place names from the Kartverket
+                topo render visibly on top of the imagery. */}
+            <TileLayer
+              url={BASEMAPS.topo.url}
+              attribution={BASEMAPS.topo.attribution}
+              maxZoom={BASEMAPS.topo.maxZoom}
+              opacity={HYBRID_TOPO_OPACITY}
+            />
+          </>
+        )}
 
-      {pairLines.map((l) => (
-        <Polyline
-          key={l.id}
-          positions={l.positions}
-          pathOptions={{
-            color: l.distance == null || l.distance < 10 ? '#2f9e44'
-                 : l.distance < 50 ? '#e0731a' : '#c92a2a',
-            weight: 2,
-            opacity: 0.7,
-            dashArray: '4 4',
-          }}
-        />
-      ))}
+        <FitBoundsAndPan points={fitPoints} selectedId={selectedId != null ? `g-${selectedId}` : null} />
+        <ClickProbe />
 
-      {gpsPoints.map((p) => (
-        <CircleMarker
-          key={`g-${p.id}`}
-          center={[p.lat, p.lon]}
-          radius={selectedId === p.id ? 10 : 7}
-          pathOptions={{
-            color: '#222',
-            weight: selectedId === p.id ? 2 : 1,
-            fillColor: compactionColor(p.compaction),
-            fillOpacity: 0.85,
-          }}
-          eventHandlers={{ click: () => onSelect && onSelect(p.id) }}
-        >
-          <Popup>
-            <b>Row {p.position + 1}</b><br />
-            Compaction: {p.compaction != null ? p.compaction.toFixed(2) + ' %' : '—'}<br />
-            {headers.map((h, i) => {
-              const k = h.trim().toLowerCase();
-              if (['densitet', 'overflate temperatur', 'hulrom'].includes(k)) {
-                return <div key={i}>{h}: {p.cells[i]}</div>;
-              }
-              return null;
-            })}
-          </Popup>
-        </CircleMarker>
-      ))}
+        {/* Pair lines only make sense when BOTH endpoints are visible —
+            a line dangling to nowhere is confusing. */}
+        {showGps && showRoad && pairLines.map((l) => (
+          <Polyline
+            key={l.id}
+            positions={l.positions}
+            pathOptions={{
+              color: l.distance == null || l.distance < 10 ? '#2f9e44'
+                   : l.distance < 50 ? '#e0731a' : '#c92a2a',
+              weight: 2,
+              opacity: 0.7,
+              dashArray: '4 4',
+            }}
+          />
+        ))}
 
-      {(roadMarkers || []).map((r) => (
-        <Marker
-          key={`r-${r.measurement.id}`}
-          position={[r.lat, r.lon]}
-          icon={ROAD_ICON}
-          eventHandlers={{ click: () => onSelect && onSelect(r.measurement.id) }}
-        >
-          <Popup>
-            <b>Road marker · row {r.measurement.position + 1}</b><br />
-            {r.kortform || r.ref}<br />
-            {r.distance_m != null && (
-              <>Gap to recorded GPS: <b>{r.distance_m.toFixed(1)} m</b></>
-            )}
-          </Popup>
-        </Marker>
-      ))}
-    </MapContainer>
+        {showGps && gpsPoints.map((p) => (
+          <CircleMarker
+            key={`g-${p.id}`}
+            center={[p.lat, p.lon]}
+            radius={selectedId === p.id ? 10 : 7}
+            pathOptions={{
+              color: '#222',
+              weight: selectedId === p.id ? 2 : 1,
+              fillColor: compactionColor(p.compaction),
+              fillOpacity: 0.85,
+            }}
+            eventHandlers={{ click: () => onSelect && onSelect(p.id) }}
+          >
+            <Popup>
+              <b>Row {p.position + 1}</b><br />
+              Compaction: {p.compaction != null ? p.compaction.toFixed(2) + ' %' : '—'}<br />
+              {headers.map((h, i) => {
+                const k = h.trim().toLowerCase();
+                if (['densitet', 'overflate temperatur', 'hulrom'].includes(k)) {
+                  return <div key={i}>{h}: {p.cells[i]}</div>;
+                }
+                return null;
+              })}
+            </Popup>
+          </CircleMarker>
+        ))}
+
+        {showRoad && (roadMarkers || []).map((r) => (
+          <Marker
+            key={`r-${r.measurement.id}`}
+            position={[r.lat, r.lon]}
+            icon={ROAD_ICON}
+            eventHandlers={{ click: () => onSelect && onSelect(r.measurement.id) }}
+          >
+            <Popup>
+              <b>Road marker · row {r.measurement.position + 1}</b><br />
+              {r.kortform || r.ref}<br />
+              {r.distance_m != null && (
+                <>Gap to recorded GPS: <b>{r.distance_m.toFixed(1)} m</b></>
+              )}
+            </Popup>
+          </Marker>
+        ))}
+      </MapContainer>
+
+      <MapControls
+        basemap={basemap}
+        onBasemapChange={setBasemap}
+        showGps={showGps}
+        onShowGpsChange={setShowGps}
+        showRoad={showRoad}
+        onShowRoadChange={setShowRoad}
+      />
+    </div>
   );
 }

@@ -24,10 +24,17 @@ Built so a field engineer can:
 
 ### Map (Kartverket + Esri)
 
+A custom control panel (top-right of the map) gives three base maps and
+two visibility toggles:
+
 - **Topographic** (Kartverket WMTS, the default) for road context.
 - **Satellite** (Esri World Imagery) for visual ground truth.
-- **Hybrid labels overlay** — togglable on top of satellite so place names and
-  road numbers stay readable.
+- **Hybrid** — satellite with the Kartverket topo layered on top at 55 %
+  opacity, so road lines, tunnel dashes, contours and place names all
+  stay readable over the imagery.
+- Toggles for **● Recorded GPS** and **◆ Road marker** to show/hide the
+  two marker types independently. The dashed pair-lines hide
+  automatically when either endpoint is off.
 - Green/orange/red circles = recorded GPS, coloured by the `Kompaktering`
   column (≥ 96 % / 92–96 % / < 92 %).
 - Purple diamonds = the position derived from the row's road marker (NVDB),
@@ -77,8 +84,6 @@ Real operator data is messy, so a few fallbacks fire automatically:
 
 - **Snap one row** (per-row button) — overwrites that row's `GPS` cell with
   the NVDB position. If the row had no GPS, this fills it in.
-- **Snap to road (skip already-close)** — snaps every row whose GPS is more
-  than 5 m off; leaves close-enough rows untouched.
 - **Snap all** — snaps every matchable row regardless of distance.
 
 After every snap the table refreshes, a banner says exactly what happened,
@@ -153,8 +158,8 @@ npm run dev          # http://localhost:5173 (proxies /api → :8080)
    is a candidate for snapping.
 4. Skim the "Road match" column for orange/red distances or "auto failed"
    rows.
-5. Click **Snap to road (skip already-close)** to fix everything in one go,
-   or use per-row Snap buttons.
+5. Use per-row Snap buttons to fix individual rows, or **Snap all** to
+   snap every matchable row in one go.
 6. For rows that don't auto-resolve, either:
    - type the correct reference (e.g. `9999 KV1234 S1D1 m100`) into the
      row's manual-ref input and press Snap, or

@@ -115,6 +115,71 @@ table.files tbody tr:hover { background: #fafbff; }
 .detail .map-pane .leaflet-container { flex: 1; }
 .detail .table-pane { overflow: auto; }
 
+/* MapView wraps the Leaflet container so the custom control panel can be
+   positioned over it. .map-pane-inner needs to take all the space the
+   pane's flex layout gives it. */
+.map-pane-inner {
+  position: relative;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.map-pane-inner .leaflet-container { flex: 1; }
+
+/* Custom basemap / visibility control panel (replaces Leaflet's LayersControl). */
+.map-controls {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 1000;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.25);
+  padding: 0.45rem 0.55rem;
+  font-size: 0.8rem;
+  min-width: 140px;
+  user-select: none;
+}
+.map-controls-section + .map-controls-section {
+  margin-top: 0.45rem;
+  padding-top: 0.4rem;
+  border-top: 1px solid var(--border);
+}
+.map-controls-title {
+  font-weight: 600;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin-bottom: 0.2rem;
+}
+.map-controls-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.1rem 0;
+  cursor: pointer;
+}
+.map-controls-row input { cursor: pointer; margin: 0; }
+
+.legend-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 0.25rem;
+  vertical-align: middle;
+}
+.legend-dot.legend-gps {
+  background: var(--accent);
+  border-radius: 50%;
+}
+.legend-dot.legend-road {
+  background: #9333ea;
+  transform: rotate(45deg);
+}
+
 table.measurements {
   width: 100%;
   border-collapse: separate;

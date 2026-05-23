@@ -30,7 +30,7 @@ const __dirname = path.dirname(__filename);
 
 // Bump this when you change anything user-visible. Surfaced via /api/version
 // and shown in the UI footer so the user can confirm which build is live.
-const APP_VERSION = '0.11.0';
+const APP_VERSION = '0.12.0';
 const APP_BUILT  = new Date().toISOString();
 
 const app = express();

@@ -207,14 +207,6 @@ export default function FileDetail({ fileId }) {
         </div>
         <div style={{ display: 'flex', gap: '0.5rem' }}>
           <button
-            className="ghost"
-            disabled={snapBusy}
-            onClick={() => onSnapAll({ onlyIfDistanceOver: 5 })}
-            title="Only snap rows where the GPS is more than 5 m from its road marker"
-          >
-            Snap to road (skip already-close)
-          </button>
-          <button
             disabled={snapBusy}
             onClick={() => {
               if (confirm('Snap every row to its NVDB road marker, including ones already close. Continue?')) {
