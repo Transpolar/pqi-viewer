@@ -1,0 +1,14 @@
+services:
+  pqi-app:
+    build: .
+    image: pqi-app:latest
+    container_name: pqi-app
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      # Persists the SQLite database across container rebuilds.
+      - pqi-data:/app/data
+
+volumes:
+  pqi-data:

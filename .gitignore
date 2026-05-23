@@ -1,0 +1,15 @@
+node_modules
+dist
+data
+*.db
+*.db-wal
+*.db-shm
+.DS_Store
+.env
+
+# Vite's stray timestamp helpers from dev runs.
+**/vite.config.js.timestamp-*
+**/vite.config.ts.timestamp-*
+
+# Never commit operator data — .pqidat files are private.
+*.pqidat

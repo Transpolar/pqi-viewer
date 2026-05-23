@@ -1,0 +1,27 @@
+# Match in every form that Docker has ever supported, so old BuildKit
+# versions can't accidentally ship the host's node_modules into the image.
+node_modules
+*/node_modules
+**/node_modules
+client/node_modules
+server/node_modules
+
+dist
+*/dist
+**/dist
+client/dist
+server/dist
+
+# Vite's auto-generated config timestamp helper (from local dev runs).
+**/vite.config.js.timestamp-*
+**/vite.config.ts.timestamp-*
+
+data
+*.db
+*.db-wal
+*.db-shm
+
+.git
+.gitignore
+.DS_Store
+README.md
