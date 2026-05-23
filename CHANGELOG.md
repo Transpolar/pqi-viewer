@@ -81,5 +81,5 @@ database.
 - Road database: NVDB API LES v4 (`X-Client: pqi-viewer`).
 - DB: SQLite (one file in `/app/data` inside the container).
 
-[0.12.0]: https://github.com/aerktisk/pqi-viewer/releases/tag/v0.12.0
-[0.11.0]: https://github.com/aerktisk/pqi-viewer/releases/tag/v0.11.0
+[0.12.0]: https://github.com/transpolar/pqi-viewer/releases/tag/v0.12.0
+[0.11.0]: https://github.com/transpolar/pqi-viewer/releases/tag/v0.11.0
