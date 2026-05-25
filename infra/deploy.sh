@@ -20,57 +20,56 @@ GITHUB_REPO="https://github.com/Transpolar/pqi-viewer"
 GITHUB_BRANCH="main"
 # ────────────────────────────────────────────────────────────
 
-# Derive ACR name the same way Bicep does
-# uniqueString equivalent in bash using resource group ID
 echo "▶ Step 1: Create resource group"
 az group create \
   --name "$RESOURCE_GROUP" \
   --location "$LOCATION" \
   --output table
 
-echo "▶ Step 2: Deploy Bicep infrastructure"
-# Download Bicep template from GitHub
 BICEP_URL="https://raw.githubusercontent.com/Transpolar/pqi-viewer/${GITHUB_BRANCH}/infra/main.bicep"
-echo "   Downloading Bicep template from GitHub..."
+echo "▶ Step 2: Download Bicep template from GitHub"
 curl -fsSL "$BICEP_URL" -o /tmp/main.bicep
 
-DEPLOY_OUTPUT=$(az deployment group create \
+# The Container App needs an image that exists before it can start, so we
+# deploy in two passes: registry + env first, then build the image, then
+# create the Container App.
+
+echo "▶ Step 3: Deploy infrastructure (ACR + Log Analytics + Storage + Env)"
+PRE_OUTPUT=$(az deployment group create \
   --resource-group "$RESOURCE_GROUP" \
+  --name pqi-pre \
   --template-file /tmp/main.bicep \
-  --parameters appName="$APP_NAME" imageTag="$IMAGE_TAG" \
+  --parameters appName="$APP_NAME" imageTag="$IMAGE_TAG" deployContainerApp=false \
   --output json)
 
-# Extract outputs
-ACR_SERVER=$(echo "$DEPLOY_OUTPUT" | \
-  python3 -c "import sys,json; \
-  o=json.load(sys.stdin)['properties']['outputs']; \
-  print(o['acrLoginServer']['value'])")
+ACR_NAME=$(echo "$PRE_OUTPUT" | python3 -c "import sys,json; print(json.load(sys.stdin)['properties']['outputs']['acrName']['value'])")
+ACR_SERVER=$(echo "$PRE_OUTPUT" | python3 -c "import sys,json; print(json.load(sys.stdin)['properties']['outputs']['acrLoginServer']['value'])")
+echo "✓ ACR: $ACR_SERVER"
 
-APP_URL=$(echo "$DEPLOY_OUTPUT" | \
-  python3 -c "import sys,json; \
-  o=json.load(sys.stdin)['properties']['outputs']; \
-  print(o['appUrl']['value'])")
-
-ACR_NAME=$(echo "$ACR_SERVER" | cut -d'.' -f1)
-
-echo "✓ ACR:     $ACR_SERVER"
-echo "✓ App URL: $APP_URL"
-
-echo "▶ Step 3: Build Docker image from GitHub using ACR Tasks"
-# ACR Tasks pulls directly from GitHub and builds in the cloud
-# No local Docker needed
+echo "▶ Step 4: Build Docker image from GitHub using ACR Tasks"
+# ACR Tasks pulls directly from GitHub and builds in the cloud — no local Docker needed.
 az acr build \
   --registry "$ACR_NAME" \
   --image "pqi-viewer:${IMAGE_TAG}" \
   --file Dockerfile \
   "${GITHUB_REPO}#${GITHUB_BRANCH}"
 
-echo "▶ Step 4: Update Container App to use new image"
-az containerapp update \
-  --name "pqi-viewer" \
+echo "▶ Step 5: Remove any prior failed Container App (idempotent)"
+az containerapp delete \
+  --name pqi-viewer \
   --resource-group "$RESOURCE_GROUP" \
-  --image "${ACR_SERVER}/pqi-viewer:${IMAGE_TAG}" \
-  --output table
+  --yes \
+  --output none 2>/dev/null || true
+
+echo "▶ Step 6: Deploy Container App (image now exists in ACR)"
+APP_OUTPUT=$(az deployment group create \
+  --resource-group "$RESOURCE_GROUP" \
+  --name pqi-app \
+  --template-file /tmp/main.bicep \
+  --parameters appName="$APP_NAME" imageTag="$IMAGE_TAG" deployContainerApp=true \
+  --output json)
+
+APP_URL=$(echo "$APP_OUTPUT" | python3 -c "import sys,json; print(json.load(sys.stdin)['properties']['outputs']['appUrl']['value'])")
 
 echo ""
 echo "✅ Deployment complete!"

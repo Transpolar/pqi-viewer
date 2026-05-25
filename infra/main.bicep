@@ -1,13 +1,17 @@
 // ============================================================
 // PQI Viewer — Azure Container Apps deployment
 // ============================================================
+// Deployed in two passes by deploy.sh:
+//   pass 1: deployContainerApp=false  → ACR + Log Analytics + Storage + Env
+//           (so the image can be built into ACR before the app needs it)
+//   pass 2: deployContainerApp=true   → adds the Container App
+//
 // Resources created:
-//   - Resource Group (via deploy script)
 //   - Log Analytics Workspace
-//   - Container Apps Environment
 //   - Azure Container Registry (ACR)
-//   - Container App (pqi-viewer)
 //   - Azure Storage Account + File Share (persistent SQLite)
+//   - Container Apps Environment
+//   - Container App (pqi-viewer)   ← only in pass 2
 // ============================================================
 
 @description('Azure region for all resources')
@@ -21,20 +25,19 @@ param appName string = 'pqiviewer'
 @description('Container image tag to deploy')
 param imageTag string = 'latest'
 
-@description('Your Docker Hub username OR leave empty to use ACR')
-param dockerHubUser string = ''
+@description('Set to false to skip creating the Container App. Used during pass 1 so the image can be built before the app tries to pull it.')
+param deployContainerApp bool = true
 
 // ── Derived names ────────────────────────────────────────────
-var acrName         = '${appName}acr${uniqueString(resourceGroup().id)}'
-var logName         = '${appName}-logs'
-var envName         = '${appName}-env'
-var storageName     = '${appName}st${uniqueString(resourceGroup().id)}'
-var shareName       = 'pqi-data'
+// Storage account names are capped at 24 chars. take() keeps us in budget
+// even when appName uses the full @maxLength(16) allowance.
+var acrName          = '${appName}acr${uniqueString(resourceGroup().id)}'
+var logName          = '${appName}-logs'
+var envName          = '${appName}-env'
+var storageName      = '${take(appName, 9)}st${take(uniqueString(resourceGroup().id), 13)}'
+var shareName        = 'pqi-data'
 var appContainerName = 'pqi-viewer'
-var useAcr          = empty(dockerHubUser)
-var imageName       = useAcr
-  ? '${acrName}.azurecr.io/pqi-viewer:${imageTag}'
-  : '${dockerHubUser}/pqi-viewer:${imageTag}'
+var imageName        = '${acr.properties.loginServer}/pqi-viewer:${imageTag}'
 
 // ── Log Analytics ─────────────────────────────────────────────
 resource logWorkspace 'Microsoft.OperationalInsights/workspaces@2022-10-01' = {
@@ -47,7 +50,7 @@ resource logWorkspace 'Microsoft.OperationalInsights/workspaces@2022-10-01' = {
 }
 
 // ── Azure Container Registry ──────────────────────────────────
-resource acr 'Microsoft.ContainerRegistry/registries@2023-01-01-preview' = if (useAcr) {
+resource acr 'Microsoft.ContainerRegistry/registries@2023-01-01-preview' = {
   name: acrName
   location: location
   sku: { name: 'Basic' }
@@ -109,7 +112,7 @@ resource envStorage 'Microsoft.App/managedEnvironments/storages@2023-05-01' = {
 }
 
 // ── Container App ─────────────────────────────────────────────
-resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
+resource containerApp 'Microsoft.App/containerApps@2023-05-01' = if (deployContainerApp) {
   name: appContainerName
   location: location
   properties: {
@@ -120,19 +123,19 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
         targetPort: 8080
         transport: 'auto'
       }
-      registries: useAcr ? [
+      registries: [
         {
-          server: '${acrName}.azurecr.io'
+          server: acr.properties.loginServer
           username: acr.listCredentials().username
           passwordSecretRef: 'acr-password'
         }
-      ] : []
-      secrets: useAcr ? [
+      ]
+      secrets: [
         {
           name: 'acr-password'
           value: acr.listCredentials().passwords[0].value
         }
-      ] : []
+      ]
     }
     template: {
       containers: [
@@ -168,5 +171,7 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
 }
 
 // ── Outputs ───────────────────────────────────────────────────
-output appUrl string = 'https://${containerApp.properties.configuration.ingress.fqdn}'
-output acrLoginServer string = useAcr ? acr.properties.loginServer : 'n/a (using Docker Hub)'
+output acrName string = acr.name
+output acrLoginServer string = acr.properties.loginServer
+var fqdn = containerApp.?properties.configuration.ingress.fqdn ?? ''
+output appUrl string = empty(fqdn) ? '' : 'https://${fqdn}'
