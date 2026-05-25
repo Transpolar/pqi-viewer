@@ -5,6 +5,39 @@ All notable changes to PQI Viewer are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0-azure] — 2026-05-25 (azure branch)
+
+The `azure` branch is the cloud-hosted variant of v0.12.0. The
+user-facing app is identical; only the persistence layer differs.
+
+### Changed
+
+- **SQLite → Postgres.** `server/db.js` rewritten against the `pg`
+  driver. Same schema (`files`, `measurements`), same JSON-blob columns,
+  same lat/lon caching, same transaction semantics for uploads. All
+  helpers are now async; Express handlers in `server/index.js` await
+  them.
+- **Dockerfile.** Drops `python3 / make / g++` build deps — `pg` is
+  pure JS, no C toolchain needed at install time.
+- **docker-compose.yml.** Adds a `postgres:16-alpine` service with a
+  healthcheck, so `docker compose up --build -d` works end-to-end
+  locally without any external DB setup.
+- **infra/main.bicep.** Drops the Premium FileStorage / NFS share /
+  managed env storage entirely. Adds an Azure Database for PostgreSQL
+  Flexible Server (`Standard_B1ms`) + database + Azure-services
+  firewall rule. The Container App reads the DB connection string from
+  a Bicep secret. Scale range widened to 0–2 replicas now that state
+  lives in a real DB.
+- **infra/deploy.sh.** `GITHUB_BRANCH=azure`, otherwise the same
+  two-pass flow as main.
+
+### Why this branch exists
+
+SQLite-on-Azure-Files is a square peg in a round hole — SMB volumes
+can't host the byte-range locks SQLite needs, and the NFS workaround
+costs $16/mo for 100 GiB of Premium FileStorage you don't need. A
+managed B1ms Postgres is ~$13/mo and is what the platform expects.
+
 ## [0.12.0] — 2026-05-23
 
 ### Changed

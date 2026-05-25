@@ -1,17 +1,24 @@
 // ============================================================
-// PQI Viewer — Azure Container Apps deployment
+// PQI Viewer — Azure Container Apps deployment (azure branch)
 // ============================================================
-// Deployed in two passes by deploy.sh:
-//   pass 1: deployContainerApp=false  → ACR + Log Analytics + Storage + Env
-//           (so the image can be built into ACR before the app needs it)
-//   pass 2: deployContainerApp=true   → adds the Container App
+// Resources created:
+//   - Log Analytics Workspace
+//   - Azure Container Registry (ACR)
+//   - Azure Database for PostgreSQL Flexible Server (B1ms)
+//   - Container Apps Environment
+//   - Container App (pqi-viewer)
 //
-// Storage: NFS-protocol Azure Files on a Premium FileStorage account.
-// SMB-backed Azure Files doesn't implement the POSIX byte-range locks
-// SQLite needs (WAL mode, and even just opening the DB). NFS does, so
-// SQLite works without any application-side changes.
-// Tradeoff: Premium FileStorage requires 100 GiB minimum provisioned
-// capacity (~$16/month at LRS pricing in most regions).
+// Why Postgres and not SQLite-on-Azure-Files: Container Apps' Azure Files
+// volumes are SMB-backed, which doesn't implement the POSIX byte-range
+// locks SQLite needs. The NFS workaround requires Premium FileStorage
+// (~$16/mo minimum) and workload-profile environments with VNet
+// integration. A B1ms managed Postgres is ~$13/mo, simpler to wire up,
+// and actually scales beyond one replica.
+//
+// Deployed in two passes by deploy.sh:
+//   pass 1: deployContainerApp=false  → infra (ACR, LA, Postgres, env)
+//   pass 2: deployContainerApp=true   → Container App with image
+//                                        built into ACR between passes
 // ============================================================
 
 @description('Azure region for all resources')
@@ -28,14 +35,19 @@ param imageTag string = 'latest'
 @description('Set to false to skip creating the Container App. Used during pass 1 so the image can be built before the app tries to pull it.')
 param deployContainerApp bool = true
 
+@description('Postgres admin username')
+param pgAdminUser string = 'pqiadmin'
+
+@description('Postgres admin password. Defaults to a deterministic value derived from the resource group id so reruns of the same deploy hit the same password.')
+@secure()
+param pgAdminPassword string = '${uniqueString(resourceGroup().id, 'pqi-pg')}Aa1!'
+
 // ── Derived names ────────────────────────────────────────────
-// Storage account names are capped at 24 chars. take() keeps us in budget
-// even when appName uses the full @maxLength(16) allowance.
 var acrName          = '${appName}acr${uniqueString(resourceGroup().id)}'
 var logName          = '${appName}-logs'
 var envName          = '${appName}-env'
-var storageName      = '${take(appName, 9)}st${take(uniqueString(resourceGroup().id), 13)}'
-var shareName        = 'pqi-data'
+var pgServerName     = '${appName}-pg'
+var pgDatabaseName   = 'pqi'
 var appContainerName = 'pqi-viewer'
 var imageName        = '${acr.properties.loginServer}/pqi-viewer:${imageTag}'
 
@@ -59,39 +71,52 @@ resource acr 'Microsoft.ContainerRegistry/registries@2023-01-01-preview' = {
   }
 }
 
-// ── Storage Account + File Share (NFS, Premium FileStorage) ───
-// kind=FileStorage + sku=Premium_LRS is the SKU required for NFS shares.
-resource storageAccount 'Microsoft.Storage/storageAccounts@2023-01-01' = {
-  name: storageName
+// ── Azure Database for PostgreSQL Flexible Server ─────────────
+// B1ms (burstable, 1 vCPU, 2 GiB) is the cheapest tier — ~$13/mo at
+// Norway East list price. 32 GiB is the smallest disk option.
+resource pgServer 'Microsoft.DBforPostgreSQL/flexibleServers@2023-06-01-preview' = {
+  name: pgServerName
   location: location
-  kind: 'FileStorage'
-  sku: { name: 'Premium_LRS' }
+  sku: {
+    name: 'Standard_B1ms'
+    tier: 'Burstable'
+  }
   properties: {
-    // NFS uses port 2049 and no TLS. minimumTlsVersion only affects the
-    // REST plane (blob/file SMB); NFS traffic is unaffected.
-    minimumTlsVersion: 'TLS1_2'
-    allowBlobPublicAccess: false
-    // SECURITY NOTE: NFS Azure Files is network-only auth — anyone who
-    // can reach the storage endpoint AND knows both the account and share
-    // names can mount it. For a personal/team tool this is acceptable
-    // (account+share names act as a weak shared secret). To harden,
-    // VNet-integrate the Container Apps env and add a private endpoint
-    // on the storage account.
+    version: '16'
+    administratorLogin: pgAdminUser
+    administratorLoginPassword: pgAdminPassword
+    storage: {
+      storageSizeGB: 32
+    }
+    backup: {
+      backupRetentionDays: 7
+      geoRedundantBackup: 'Disabled'
+    }
+    highAvailability: {
+      mode: 'Disabled'
+    }
   }
 }
 
-resource fileService 'Microsoft.Storage/storageAccounts/fileServices@2023-01-01' = {
-  parent: storageAccount
-  name: 'default'
+// Allow Azure-internal traffic. The special 0.0.0.0 → 0.0.0.0 rule is
+// "Allow public access from any Azure service within Azure to this
+// server" — that includes Container Apps managed environments. Without
+// this the Container App can't reach the DB.
+resource pgFirewallAllowAzure 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@2023-06-01-preview' = {
+  parent: pgServer
+  name: 'AllowAllAzureServices'
+  properties: {
+    startIpAddress: '0.0.0.0'
+    endIpAddress: '0.0.0.0'
+  }
 }
 
-resource fileShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2023-01-01' = {
-  parent: fileService
-  name: shareName
+resource pgDatabase 'Microsoft.DBforPostgreSQL/flexibleServers/databases@2023-06-01-preview' = {
+  parent: pgServer
+  name: pgDatabaseName
   properties: {
-    shareQuota: 100               // 100 GiB — Premium minimum
-    enabledProtocols: 'NFS'
-    rootSquash: 'NoRootSquash'    // container runs as root by default
+    charset: 'UTF8'
+    collation: 'en_US.utf8'
   }
 }
 
@@ -110,20 +135,6 @@ resource containerEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
   }
 }
 
-// Attach the NFS file share to the environment.
-// The `server` field encodes both account host and the NFS export path,
-// matching the same form `mount -t nfs` would use.
-resource envStorage 'Microsoft.App/managedEnvironments/storages@2024-03-01' = {
-  parent: containerEnv
-  name: 'pqi-data-storage'
-  properties: {
-    nfsAzureFile: {
-      server: '${storageAccount.name}.file.${environment().suffixes.storage}:/${storageAccount.name}/${shareName}'
-      accessMode: 'ReadWrite'
-    }
-  }
-}
-
 // ── Container App ─────────────────────────────────────────────
 resource containerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployContainerApp) {
   name: appContainerName
@@ -132,7 +143,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployConta
     environmentId: containerEnv.id
     configuration: {
       ingress: {
-        external: true          // public HTTPS endpoint
+        external: true
         targetPort: 8080
         transport: 'auto'
       }
@@ -148,6 +159,13 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployConta
           name: 'acr-password'
           value: acr.listCredentials().passwords[0].value
         }
+        {
+          // App reads DATABASE_URL at startup. Storing it as a secret keeps
+          // the password out of `az containerapp show` output (it shows up
+          // as `secretref:database-url` instead of plaintext).
+          name: 'database-url'
+          value: 'postgres://${pgAdminUser}:${pgAdminPassword}@${pgServer.properties.fullyQualifiedDomainName}:5432/${pgDatabaseName}?sslmode=require'
+        }
       ]
     }
     template: {
@@ -159,32 +177,27 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployConta
             cpu: json('0.5')    // 0.5 vCPU
             memory: '1Gi'
           }
-          volumeMounts: [
+          env: [
             {
-              volumeName: 'pqi-data'
-              mountPath: '/app/data'  // matches Dockerfile volume
+              name: 'DATABASE_URL'
+              secretRef: 'database-url'
             }
           ]
         }
       ]
       scale: {
-        minReplicas: 0          // scales to zero when idle = cheapest option
-        maxReplicas: 1
+        minReplicas: 0          // scales to zero when idle
+        maxReplicas: 2          // can scale up now that state lives in Postgres
       }
-      volumes: [
-        {
-          name: 'pqi-data'
-          storageType: 'NfsAzureFile'
-          storageName: 'pqi-data-storage'
-        }
-      ]
     }
   }
-  dependsOn: [envStorage]
+  dependsOn: [pgDatabase]
 }
 
 // ── Outputs ───────────────────────────────────────────────────
 output acrName string = acr.name
 output acrLoginServer string = acr.properties.loginServer
+output pgServerName string = pgServer.name
+output pgFqdn string = pgServer.properties.fullyQualifiedDomainName
 var fqdn = containerApp.?properties.configuration.ingress.fqdn ?? ''
 output appUrl string = empty(fqdn) ? '' : 'https://${fqdn}'

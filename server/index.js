@@ -1,4 +1,5 @@
 // Express server: serves the built React frontend + REST API for PQI files.
+// Azure branch — all DB calls are async (Postgres via the `pg` driver).
 import express from 'express';
 import multer from 'multer';
 import path from 'node:path';
@@ -6,6 +7,7 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { parsePqi, serializePqi, parseGps, formatGps, findColumn } from './pqi.js';
 import {
+  initSchema,
   insertFile,
   listFiles,
   getFile,
@@ -30,18 +32,14 @@ const __dirname = path.dirname(__filename);
 
 // Bump this when you change anything user-visible. Surfaced via /api/version
 // and shown in the UI footer so the user can confirm which build is live.
-const APP_VERSION = '0.12.0';
+const APP_VERSION = '0.12.0-azure';
 const APP_BUILT  = new Date().toISOString();
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 
-// Request logger — prints every API call to stdout so `docker compose logs
-// -f pqi-app` shows exactly what hit the server (method, path, status,
-// duration). This is critical for debugging "snap doesn't do anything":
-// if the user clicks Snap and no log line appears, the request never
-// reached the container (proxy/firewall issue). If a log line appears
-// with status != 2xx, we know which row/error to investigate.
+// Request logger — prints every API call to stdout so container logs show
+// exactly what hit the server (method, path, status, duration).
 app.use((req, res, next) => {
   if (!req.url.startsWith('/api')) return next();
   const started = Date.now();
@@ -73,7 +71,6 @@ function refFromRow(headers, cells, defaultKommune) {
   if (b2Idx >= 0) {
     let road = stedIdx >= 0 ? (cells[stedIdx] || '').trim() : '';
     if (!road) {
-      // Fall back to the SECOND "Sted" column.
       let found = -1, n = 0;
       for (let i = 0; i < headers.length; i++) {
         if (headers[i].trim().toLowerCase() === 'sted') {
@@ -90,12 +87,9 @@ function refFromRow(headers, cells, defaultKommune) {
     }
   }
 
-  // Last resort: maybe the operator typed the whole reference into a
-  // random cell. Look for "<kommune>?<cat>V<num><section>M<meter>".
   return scanCellsForCombinedRef(cells, { defaultKommune });
 }
 
-// Was the section assumed (S1D1 default) rather than embedded in the road string?
 function rowSectionWasDefaulted(headers, cells) {
   const b1Idx = findColumn(headers, 'Beskrivelse1');
   const stedIdx = findColumn(headers, 'Sted på veien');
@@ -104,15 +98,11 @@ function rowSectionWasDefaulted(headers, cells) {
   return isSectionDefaulted(sted, b1);
 }
 
-// True if Sted på veien is missing the kommune prefix for a K/P/S road.
 function rowKommuneWasMissing(headers, cells) {
   const stedIdx = findColumn(headers, 'Sted på veien');
   return stedIdx >= 0 && isKommuneMissing(cells[stedIdx]);
 }
 
-// Diagnostic helper: which mandatory input columns are blank for this row?
-// Mandatory = road + meter. Section is no longer in this list since we
-// auto-default it.
 function refMissingReason(headers, cells) {
   const stedIdx = findColumn(headers, 'Sted på veien');
   const b2Idx = findColumn(headers, 'Beskrivelse2');
@@ -136,8 +126,6 @@ function refMissingReason(headers, cells) {
 
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
 
-// Hit this from your browser to verify which build the container is serving:
-//   http://your-server:8080/api/version
 app.get('/api/version', (_req, res) => res.json({
   version: APP_VERSION,
   built: APP_BUILT,
@@ -145,268 +133,277 @@ app.get('/api/version', (_req, res) => res.json({
   pid: process.pid,
 }));
 
-app.get('/api/files', (_req, res) => {
-  res.json(listFiles());
+app.get('/api/files', async (_req, res, next) => {
+  try {
+    res.json(await listFiles());
+  } catch (err) { next(err); }
 });
 
-app.get('/api/files/:id', (req, res) => {
-  const id = Number(req.params.id);
-  const file = getFile(id);
-  if (!file) return res.status(404).json({ error: 'not found' });
+app.get('/api/files/:id', async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    const file = await getFile(id);
+    if (!file) return res.status(404).json({ error: 'not found' });
 
-  const defaultKommune = inferDefaultKommune(file.measurements.map((m) => m.cells));
-  file.measurements = file.measurements.map((m) => {
-    const kommuneInferred =
-      defaultKommune && rowKommuneWasMissing(file.headers, m.cells);
-    const roadRef = refFromRow(file.headers, m.cells, defaultKommune);
-    return {
-      ...m,
-      roadRef,
-      sectionDefaulted: roadRef ? rowSectionWasDefaulted(file.headers, m.cells) : false,
-      kommuneInferred: !!kommuneInferred,
-      missingForRef: roadRef ? [] : refMissingReason(file.headers, m.cells),
-    };
-  });
-  file.defaultKommune = defaultKommune;
-  res.json(file);
+    const defaultKommune = inferDefaultKommune(file.measurements.map((m) => m.cells));
+    file.measurements = file.measurements.map((m) => {
+      const kommuneInferred =
+        defaultKommune && rowKommuneWasMissing(file.headers, m.cells);
+      const roadRef = refFromRow(file.headers, m.cells, defaultKommune);
+      return {
+        ...m,
+        roadRef,
+        sectionDefaulted: roadRef ? rowSectionWasDefaulted(file.headers, m.cells) : false,
+        kommuneInferred: !!kommuneInferred,
+        missingForRef: roadRef ? [] : refMissingReason(file.headers, m.cells),
+      };
+    });
+    file.defaultKommune = defaultKommune;
+    res.json(file);
+  } catch (err) { next(err); }
 });
 
-app.post('/api/files', upload.single('file'), (req, res) => {
+app.post('/api/files', upload.single('file'), async (req, res, next) => {
   if (!req.file) return res.status(400).json({ error: 'file required' });
   const filename = req.file.originalname || 'upload.pqidat';
   const text = req.file.buffer.toString('utf8');
   try {
     const doc = parsePqi(text);
-    const id = insertFile(doc, filename);
+    const id = await insertFile(doc, filename);
     res.json({ id, filename, measurements: doc.rows.length });
   } catch (err) {
-    res.status(400).json({ error: 'parse failed', detail: String(err.message || err) });
+    if (err && err.message && err.message.startsWith('PQI')) {
+      return res.status(400).json({ error: 'parse failed', detail: String(err.message) });
+    }
+    next(err);
   }
 });
 
-app.patch('/api/measurements/:id', (req, res) => {
-  const id = Number(req.params.id);
-  const { columnIndex, value } = req.body || {};
-  if (!Number.isInteger(columnIndex) || columnIndex < 0) {
-    return res.status(400).json({ error: 'columnIndex (integer) required' });
-  }
-  if (typeof value !== 'string') {
-    return res.status(400).json({ error: 'value must be a string' });
-  }
+app.patch('/api/measurements/:id', async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    const { columnIndex, value } = req.body || {};
+    if (!Number.isInteger(columnIndex) || columnIndex < 0) {
+      return res.status(400).json({ error: 'columnIndex (integer) required' });
+    }
+    if (typeof value !== 'string') {
+      return res.status(400).json({ error: 'value must be a string' });
+    }
 
-  const headers = getHeadersForMeasurement(id);
-  if (!headers) return res.status(404).json({ error: 'measurement not found' });
+    const headers = await getHeadersForMeasurement(id);
+    if (!headers) return res.status(404).json({ error: 'measurement not found' });
 
-  let parsedGps;
-  const gpsIdx = findColumn(headers, 'GPS');
-  if (gpsIdx === columnIndex) {
-    parsedGps = parseGps(value);
-  }
+    let parsedGps;
+    const gpsIdx = findColumn(headers, 'GPS');
+    if (gpsIdx === columnIndex) {
+      parsedGps = parseGps(value);
+    }
 
-  const updated = updateMeasurementCell(id, columnIndex, value, parsedGps);
-  if (!updated) return res.status(404).json({ error: 'measurement not found' });
-  res.json(updated);
+    const updated = await updateMeasurementCell(id, columnIndex, value, parsedGps);
+    if (!updated) return res.status(404).json({ error: 'measurement not found' });
+    res.json(updated);
+  } catch (err) { next(err); }
 });
 
 // --- Road-marker matching -----------------------------------------------
 
-// GET /api/files/:id/road-positions
-// Look up the NVDB road-marker position for every row that has a valid
-// road reference. Returns positions + distance from the recorded GPS.
-// This is the "preview" call — it does NOT mutate the database.
-app.get('/api/files/:id/road-positions', async (req, res) => {
-  const id = Number(req.params.id);
-  const file = getFile(id);
-  if (!file) return res.status(404).json({ error: 'not found' });
+app.get('/api/files/:id/road-positions', async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    const file = await getFile(id);
+    if (!file) return res.status(404).json({ error: 'not found' });
 
-  const defaultKommune = inferDefaultKommune(file.measurements.map((m) => m.cells));
-  const refsByMeasurement = new Map(); // measurementId → ref string
-  for (const m of file.measurements) {
-    const ref = refFromRow(file.headers, m.cells, defaultKommune);
-    if (ref) refsByMeasurement.set(m.id, ref);
-  }
-
-  const results = await lookupRefsBatch(Array.from(refsByMeasurement.values()));
-
-  const out = file.measurements.map((m) => {
-    const ref = refsByMeasurement.get(m.id);
-    if (!ref) return { id: m.id, position: m.position, ref: null };
-    const r = results.get(ref);
-    if (!r || r.error) {
-      return { id: m.id, position: m.position, ref, error: r?.error || 'lookup failed' };
+    const defaultKommune = inferDefaultKommune(file.measurements.map((m) => m.cells));
+    const refsByMeasurement = new Map();
+    for (const m of file.measurements) {
+      const ref = refFromRow(file.headers, m.cells, defaultKommune);
+      if (ref) refsByMeasurement.set(m.id, ref);
     }
-    const dist = m.lat != null && m.lon != null
-      ? haversineMetres(m.lat, m.lon, r.lat, r.lon)
-      : null;
-    return {
-      id: m.id,
-      position: m.position,
+
+    const results = await lookupRefsBatch(Array.from(refsByMeasurement.values()));
+
+    const out = file.measurements.map((m) => {
+      const ref = refsByMeasurement.get(m.id);
+      if (!ref) return { id: m.id, position: m.position, ref: null };
+      const r = results.get(ref);
+      if (!r || r.error) {
+        return { id: m.id, position: m.position, ref, error: r?.error || 'lookup failed' };
+      }
+      const dist = m.lat != null && m.lon != null
+        ? haversineMetres(m.lat, m.lon, r.lat, r.lon)
+        : null;
+      return {
+        id: m.id,
+        position: m.position,
+        ref,
+        kortform: r.kortform,
+        lat: r.lat,
+        lon: r.lon,
+        distance_m: dist,
+      };
+    });
+
+    res.json(out);
+  } catch (err) { next(err); }
+});
+
+app.post('/api/measurements/:id/snap', async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    const ctx = await getMeasurementWithFile(id);
+    if (!ctx) return res.status(404).json({ error: 'measurement not found' });
+
+    const manualRef = typeof req.body?.ref === 'string' ? req.body.ref.trim() : '';
+    const fileForKommune = await getFile(ctx.file.id);
+    const defaultKommune = inferDefaultKommune(
+      (fileForKommune?.measurements || []).map((m) => m.cells)
+    );
+    const ref = manualRef || refFromRow(
+      ctx.file.headers, ctx.measurement.cells, defaultKommune
+    );
+    if (!ref) return res.status(400).json({
+      error: 'row has no usable road reference',
+      hint: 'pass {"ref": "9999 KV1234 S1D1 m100"} in the request body to override',
+    });
+
+    const result = await lookupRef(ref);
+    if (result.error) return res.status(502).json({ error: 'NVDB lookup failed', detail: result.error, ref });
+
+    const gpsIdx = findColumn(ctx.file.headers, 'GPS');
+    if (gpsIdx < 0) return res.status(500).json({ error: 'file has no GPS column' });
+
+    const formatted = formatGps(result.lat, result.lon);
+    const updated = await applySnap(id, gpsIdx, formatted, result.lat, result.lon);
+    console.log(`[snap] m${id} ref=${ref} → ${formatted}`);
+    res.json({
+      ...updated,
       ref,
-      kortform: r.kortform,
-      lat: r.lat,
-      lon: r.lon,
-      distance_m: dist,
-    };
-  });
-
-  res.json(out);
+      kortform: result.kortform,
+      gpsColIndex: gpsIdx,
+      gps: formatted,
+    });
+  } catch (err) { next(err); }
 });
 
-// POST /api/measurements/:id/snap
-// Looks up the row's road reference, then overwrites its GPS column with
-// the road-marker position. Returns the updated row (with cells/lat/lon).
-//
-// Optional body: { ref: "9999 KV1234 S1D1 m100" } overrides auto-detection
-// for files where Sted på veien / Beskrivelse columns are empty. NVDB is
-// quite tolerant of formatting variations so the exact spacing rarely
-// matters; we pass the user's string through verbatim.
-app.post('/api/measurements/:id/snap', async (req, res) => {
-  const id = Number(req.params.id);
-  const ctx = getMeasurementWithFile(id);
-  if (!ctx) return res.status(404).json({ error: 'measurement not found' });
-
-  const manualRef = typeof req.body?.ref === 'string' ? req.body.ref.trim() : '';
-  // Need every row's cells to infer the file's default kommune.
-  const fileForKommune = getFile(ctx.file.id);
-  const defaultKommune = inferDefaultKommune(
-    (fileForKommune?.measurements || []).map((m) => m.cells)
-  );
-  const ref = manualRef || refFromRow(
-    ctx.file.headers, ctx.measurement.cells, defaultKommune
-  );
-  if (!ref) return res.status(400).json({
-    error: 'row has no usable road reference',
-    hint: 'pass {"ref": "9999 KV1234 S1D1 m100"} in the request body to override',
-  });
-
-  const result = await lookupRef(ref);
-  if (result.error) return res.status(502).json({ error: 'NVDB lookup failed', detail: result.error, ref });
-
-  const gpsIdx = findColumn(ctx.file.headers, 'GPS');
-  if (gpsIdx < 0) return res.status(500).json({ error: 'file has no GPS column' });
-
-  const formatted = formatGps(result.lat, result.lon);
-  const updated = applySnap(id, gpsIdx, formatted, result.lat, result.lon);
-  console.log(`[snap] m${id} ref=${ref} → ${formatted}`);
-  res.json({
-    ...updated,
-    ref,
-    kortform: result.kortform,
-    gpsColIndex: gpsIdx,
-    gps: formatted, // the exact string written into cells[gpsColIndex]
-  });
-});
-
-// POST /api/measurements/:id/set-gps   body: { lat, lon }
-// Assign a lat/lon to a measurement (typically the coordinates the user
-// got by clicking on the map). Writes the formatted PQI-style string into
-// the GPS cell and updates the cached lat/lon.
-app.post('/api/measurements/:id/set-gps', (req, res) => {
-  const id = Number(req.params.id);
-  const lat = Number(req.body?.lat);
-  const lon = Number(req.body?.lon);
-  if (!isFinite(lat) || !isFinite(lon)) {
-    return res.status(400).json({ error: 'lat and lon (numbers) required in body' });
-  }
-  const ctx = getMeasurementWithFile(id);
-  if (!ctx) return res.status(404).json({ error: 'measurement not found' });
-  const gpsIdx = findColumn(ctx.file.headers, 'GPS');
-  if (gpsIdx < 0) return res.status(500).json({ error: 'file has no GPS column' });
-
-  const formatted = formatGps(lat, lon);
-  const updated = applySnap(id, gpsIdx, formatted, lat, lon);
-  console.log(`[set-gps] m${id} → ${formatted}`);
-  res.json({ ...updated, gpsColIndex: gpsIdx, gps: formatted });
-});
-
-// POST /api/files/:id/snap-all
-// Batch-snap every row in the file that has a usable road reference.
-// Body: { onlyIfDistanceOver?: number }  — skip rows already close enough.
-app.post('/api/files/:id/snap-all', async (req, res) => {
-  const id = Number(req.params.id);
-  const file = getFile(id);
-  if (!file) return res.status(404).json({ error: 'not found' });
-
-  const onlyOver = Number(req.body?.onlyIfDistanceOver);
-  const gpsIdx = findColumn(file.headers, 'GPS');
-  if (gpsIdx < 0) return res.status(500).json({ error: 'file has no GPS column' });
-
-  const defaultKommune = inferDefaultKommune(file.measurements.map((m) => m.cells));
-  const refsByMeasurement = new Map();
-  for (const m of file.measurements) {
-    const ref = refFromRow(file.headers, m.cells, defaultKommune);
-    if (ref) refsByMeasurement.set(m.id, ref);
-  }
-  const results = await lookupRefsBatch(Array.from(refsByMeasurement.values()));
-
-  let snapped = 0;
-  let skipped = 0;
-  let failed = 0;
-  const details = [];
-  for (const m of file.measurements) {
-    const ref = refsByMeasurement.get(m.id);
-    if (!ref) { skipped++; details.push({ id: m.id, ref: null, reason: 'no road reference' }); continue; }
-    const r = results.get(ref);
-    if (!r || r.error) { failed++; details.push({ id: m.id, ref, reason: r?.error || 'lookup failed' }); continue; }
-
-    const distBefore = m.lat != null && m.lon != null
-      ? haversineMetres(m.lat, m.lon, r.lat, r.lon)
-      : null;
-    if (isFinite(onlyOver) && distBefore != null && distBefore < onlyOver) {
-      skipped++;
-      details.push({ id: m.id, ref, reason: `within ${onlyOver}m (${distBefore.toFixed(1)}m)` });
-      continue;
+app.post('/api/measurements/:id/set-gps', async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    const lat = Number(req.body?.lat);
+    const lon = Number(req.body?.lon);
+    if (!isFinite(lat) || !isFinite(lon)) {
+      return res.status(400).json({ error: 'lat and lon (numbers) required in body' });
     }
-    const formatted = formatGps(r.lat, r.lon);
-    applySnap(m.id, gpsIdx, formatted, r.lat, r.lon);
-    snapped++;
-    details.push({ id: m.id, ref, distance_m: distBefore, kortform: r.kortform });
-  }
+    const ctx = await getMeasurementWithFile(id);
+    if (!ctx) return res.status(404).json({ error: 'measurement not found' });
+    const gpsIdx = findColumn(ctx.file.headers, 'GPS');
+    if (gpsIdx < 0) return res.status(500).json({ error: 'file has no GPS column' });
 
-  res.json({ snapped, skipped, failed, details });
+    const formatted = formatGps(lat, lon);
+    const updated = await applySnap(id, gpsIdx, formatted, lat, lon);
+    console.log(`[set-gps] m${id} → ${formatted}`);
+    res.json({ ...updated, gpsColIndex: gpsIdx, gps: formatted });
+  } catch (err) { next(err); }
 });
 
-// GET /api/road-position?lat=&lon=&maks_avstand=
-// Reverse NVDB lookup: returns the road marker nearest a given map click.
-app.get('/api/road-position', async (req, res) => {
-  const lat = Number(req.query.lat);
-  const lon = Number(req.query.lon);
-  const maxDist = req.query.maks_avstand ? Number(req.query.maks_avstand) : 200;
-  if (!isFinite(lat) || !isFinite(lon)) {
-    return res.status(400).json({ error: 'lat and lon (numbers) required' });
-  }
-  const result = await lookupPosition(lat, lon, maxDist);
-  if (result.error) return res.status(404).json({ error: result.error });
-  res.json(result);
+app.post('/api/files/:id/snap-all', async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    const file = await getFile(id);
+    if (!file) return res.status(404).json({ error: 'not found' });
+
+    const onlyOver = Number(req.body?.onlyIfDistanceOver);
+    const gpsIdx = findColumn(file.headers, 'GPS');
+    if (gpsIdx < 0) return res.status(500).json({ error: 'file has no GPS column' });
+
+    const defaultKommune = inferDefaultKommune(file.measurements.map((m) => m.cells));
+    const refsByMeasurement = new Map();
+    for (const m of file.measurements) {
+      const ref = refFromRow(file.headers, m.cells, defaultKommune);
+      if (ref) refsByMeasurement.set(m.id, ref);
+    }
+    const results = await lookupRefsBatch(Array.from(refsByMeasurement.values()));
+
+    let snapped = 0;
+    let skipped = 0;
+    let failed = 0;
+    const details = [];
+    for (const m of file.measurements) {
+      const ref = refsByMeasurement.get(m.id);
+      if (!ref) { skipped++; details.push({ id: m.id, ref: null, reason: 'no road reference' }); continue; }
+      const r = results.get(ref);
+      if (!r || r.error) { failed++; details.push({ id: m.id, ref, reason: r?.error || 'lookup failed' }); continue; }
+
+      const distBefore = m.lat != null && m.lon != null
+        ? haversineMetres(m.lat, m.lon, r.lat, r.lon)
+        : null;
+      if (isFinite(onlyOver) && distBefore != null && distBefore < onlyOver) {
+        skipped++;
+        details.push({ id: m.id, ref, reason: `within ${onlyOver}m (${distBefore.toFixed(1)}m)` });
+        continue;
+      }
+      const formatted = formatGps(r.lat, r.lon);
+      await applySnap(m.id, gpsIdx, formatted, r.lat, r.lon);
+      snapped++;
+      details.push({ id: m.id, ref, distance_m: distBefore, kortform: r.kortform });
+    }
+
+    res.json({ snapped, skipped, failed, details });
+  } catch (err) { next(err); }
+});
+
+app.get('/api/road-position', async (req, res, next) => {
+  try {
+    const lat = Number(req.query.lat);
+    const lon = Number(req.query.lon);
+    const maxDist = req.query.maks_avstand ? Number(req.query.maks_avstand) : 200;
+    if (!isFinite(lat) || !isFinite(lon)) {
+      return res.status(400).json({ error: 'lat and lon (numbers) required' });
+    }
+    const result = await lookupPosition(lat, lon, maxDist);
+    if (result.error) return res.status(404).json({ error: result.error });
+    res.json(result);
+  } catch (err) { next(err); }
 });
 
 // --- Export -------------------------------------------------------------
 
-app.get('/api/files/:id/export', (req, res) => {
-  const id = Number(req.params.id);
-  const file = getFile(id);
-  if (!file) return res.status(404).json({ error: 'not found' });
+app.get('/api/files/:id/export', async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    const file = await getFile(id);
+    if (!file) return res.status(404).json({ error: 'not found' });
 
-  const doc = {
-    version: file.version,
-    serial: file.serial,
-    headers: file.headers,
-    rows: file.measurements.map((m) => ({ cells: m.cells })),
-  };
-  const out = serializePqi(doc);
+    const doc = {
+      version: file.version,
+      serial: file.serial,
+      headers: file.headers,
+      rows: file.measurements.map((m) => ({ cells: m.cells })),
+    };
+    const out = serializePqi(doc);
 
-  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-  res.setHeader(
-    'Content-Disposition',
-    `attachment; filename="${file.filename.replace(/[^a-zA-Z0-9._-]/g, '_')}"`
-  );
-  res.send(out);
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${file.filename.replace(/[^a-zA-Z0-9._-]/g, '_')}"`
+    );
+    res.send(out);
+  } catch (err) { next(err); }
 });
 
-app.delete('/api/files/:id', (req, res) => {
-  const id = Number(req.params.id);
-  deleteFile(id);
-  res.json({ ok: true });
+app.delete('/api/files/:id', async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    await deleteFile(id);
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
+// Catch-all error handler. Without this, a thrown error in any handler
+// dangles the request until the client times out. Logs to stdout (visible
+// in container logs) and returns a JSON 500.
+app.use((err, _req, res, _next) => {
+  console.error('[err]', err);
+  res.status(500).json({ error: 'internal error', detail: String(err?.message || err) });
 });
 
 // --- Static frontend ----------------------------------------------------
@@ -420,6 +417,17 @@ if (fs.existsSync(clientDist)) {
 }
 
 const PORT = Number(process.env.PORT) || 8080;
-app.listen(PORT, () => {
-  console.log(`PQI app listening on http://0.0.0.0:${PORT}`);
-});
+
+// Init schema first so the first /api/files request doesn't race table
+// creation. If Postgres is unreachable at boot we want to crash loudly
+// rather than silently serve 500s — Container Apps will restart us.
+initSchema()
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`PQI app (azure/Postgres) listening on http://0.0.0.0:${PORT}`);
+    });
+  })
+  .catch((err) => {
+    console.error('[fatal] schema init failed:', err);
+    process.exit(1);
+  });
