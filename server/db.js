@@ -1,119 +1,150 @@
-// SQLite schema and helpers (synchronous via better-sqlite3).
-import Database from 'better-sqlite3';
-import path from 'node:path';
-import fs from 'node:fs';
+// Postgres schema and helpers, async via the `pg` driver.
+//
+// This is the Azure branch — main uses better-sqlite3 against a single
+// SQLite file. Cloud-hosted Container Apps can't host a SQLite file (no
+// good shared persistent disk option), so we hit a managed Postgres
+// instead. The schema, JSON-blob columns, and lat/lon caching are kept
+// identical so the rest of the app doesn't need to know.
+import pg from 'pg';
 
-const DATA_DIR = process.env.PQI_DATA_DIR || path.resolve(process.cwd(), 'data');
-fs.mkdirSync(DATA_DIR, { recursive: true });
+const { Pool } = pg;
 
-const DB_PATH = process.env.PQI_DB_PATH || path.join(DATA_DIR, 'pqi.db');
+const connectionString = process.env.DATABASE_URL;
+if (!connectionString) {
+  console.error('DATABASE_URL env var is required (e.g. postgres://user:pw@host:5432/pqi?sslmode=require)');
+  process.exit(1);
+}
 
-export const db = new Database(DB_PATH);
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+// `pg` picks up ssl=true from `?sslmode=require` in the URL, which is what
+// Azure Database for PostgreSQL Flexible Server demands by default.
+export const pool = new Pool({ connectionString });
 
-db.exec(`
-CREATE TABLE IF NOT EXISTS files (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  filename TEXT NOT NULL,
-  version TEXT,
-  serial TEXT,
-  headers_json TEXT NOT NULL,
-  uploaded_at TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
+pool.on('error', (err) => {
+  // Long-lived idle clients in the pool can be cut by network blips; the
+  // pool will reconnect on next use, just log and continue so we don't
+  // crash the process.
+  console.error('[pg] idle client error:', err);
+});
 
-CREATE TABLE IF NOT EXISTS measurements (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  file_id INTEGER NOT NULL,
-  position INTEGER NOT NULL,         -- order within the file (0-based)
-  cells_json TEXT NOT NULL,          -- JSON array of cell strings, indexed by column position
-  lat REAL,
-  lon REAL,
-  FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
-);
+// Idempotent schema init. Called once at startup from index.js before
+// app.listen(). Mirrors the SQLite schema in main/server/db.js.
+export async function initSchema() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS files (
+      id           BIGSERIAL PRIMARY KEY,
+      filename     TEXT NOT NULL,
+      version      TEXT,
+      serial       TEXT,
+      headers_json TEXT NOT NULL,
+      uploaded_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS measurements (
+      id          BIGSERIAL PRIMARY KEY,
+      file_id     BIGINT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+      position    INTEGER NOT NULL,
+      cells_json  TEXT NOT NULL,
+      lat         DOUBLE PRECISION,
+      lon         DOUBLE PRECISION
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_measurements_file ON measurements(file_id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_measurements_file_pos ON measurements(file_id, position)`);
+}
 
-CREATE INDEX IF NOT EXISTS idx_measurements_file ON measurements(file_id);
-CREATE INDEX IF NOT EXISTS idx_measurements_file_pos ON measurements(file_id, position);
-`);
+// pg returns BIGSERIAL ids as JS strings (numbers >2^53 can't be JS
+// numbers safely). For our row counts they fit fine, so coerce.
+const num = (v) => (v == null ? null : Number(v));
 
-export function insertFile(doc, filename) {
-  const insertFileStmt = db.prepare(
-    `INSERT INTO files (filename, version, serial, headers_json) VALUES (?, ?, ?, ?)`
-  );
-  const insertRowStmt = db.prepare(
-    `INSERT INTO measurements (file_id, position, cells_json, lat, lon) VALUES (?, ?, ?, ?, ?)`
-  );
+// pg returns TIMESTAMPTZ as a JS Date; the React frontend already accepts
+// ISO strings via Date parsing, so always emit ISO for consistency with
+// the SQLite branch's text format.
+const iso = (d) => (d instanceof Date ? d.toISOString() : (d == null ? '' : String(d)));
 
-  const tx = db.transaction((doc, filename) => {
-    const info = insertFileStmt.run(
-      filename,
-      doc.version || '',
-      doc.serial || '',
-      JSON.stringify(doc.headers)
+export async function insertFile(doc, filename) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const fileRes = await client.query(
+      `INSERT INTO files (filename, version, serial, headers_json)
+       VALUES ($1, $2, $3, $4) RETURNING id`,
+      [filename, doc.version || '', doc.serial || '', JSON.stringify(doc.headers)]
     );
-    const fileId = info.lastInsertRowid;
-    doc.rows.forEach((row, idx) => {
-      insertRowStmt.run(
-        fileId,
-        idx,
-        JSON.stringify(row.cells),
-        row.gps ? row.gps.lat : null,
-        row.gps ? row.gps.lon : null
+    const fileId = num(fileRes.rows[0].id);
+    for (let idx = 0; idx < doc.rows.length; idx++) {
+      const row = doc.rows[idx];
+      await client.query(
+        `INSERT INTO measurements (file_id, position, cells_json, lat, lon)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [fileId, idx, JSON.stringify(row.cells), row.gps ? row.gps.lat : null, row.gps ? row.gps.lon : null]
       );
-    });
+    }
+    await client.query('COMMIT');
     return fileId;
-  });
-
-  return tx(doc, filename);
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
-export function listFiles() {
-  return db
-    .prepare(
-      `SELECT f.id, f.filename, f.version, f.serial, f.uploaded_at, f.updated_at,
-              (SELECT COUNT(*) FROM measurements m WHERE m.file_id = f.id) AS measurement_count
-         FROM files f
-         ORDER BY f.uploaded_at DESC`
-    )
-    .all();
+export async function listFiles() {
+  const res = await pool.query(`
+    SELECT f.id, f.filename, f.version, f.serial, f.uploaded_at, f.updated_at,
+           (SELECT COUNT(*) FROM measurements m WHERE m.file_id = f.id) AS measurement_count
+      FROM files f
+     ORDER BY f.uploaded_at DESC
+  `);
+  return res.rows.map((r) => ({
+    id: num(r.id),
+    filename: r.filename,
+    version: r.version,
+    serial: r.serial,
+    measurement_count: num(r.measurement_count),
+    uploaded_at: iso(r.uploaded_at),
+    updated_at: iso(r.updated_at),
+  }));
 }
 
-export function getFile(id) {
-  const file = db.prepare(`SELECT * FROM files WHERE id = ?`).get(id);
-  if (!file) return null;
-  const measurements = db
-    .prepare(
-      `SELECT id, position, cells_json, lat, lon
-         FROM measurements WHERE file_id = ? ORDER BY position ASC`
-    )
-    .all(id)
-    .map((m) => ({
-      id: m.id,
-      position: m.position,
-      cells: JSON.parse(m.cells_json),
-      lat: m.lat,
-      lon: m.lon,
-    }));
+export async function getFile(id) {
+  const fileRes = await pool.query(`SELECT * FROM files WHERE id = $1`, [id]);
+  if (fileRes.rows.length === 0) return null;
+  const file = fileRes.rows[0];
+  const mRes = await pool.query(
+    `SELECT id, position, cells_json, lat, lon FROM measurements
+     WHERE file_id = $1 ORDER BY position ASC`,
+    [id]
+  );
   return {
-    id: file.id,
+    id: num(file.id),
     filename: file.filename,
     version: file.version,
     serial: file.serial,
     headers: JSON.parse(file.headers_json),
-    uploaded_at: file.uploaded_at,
-    updated_at: file.updated_at,
-    measurements,
+    uploaded_at: iso(file.uploaded_at),
+    updated_at: iso(file.updated_at),
+    measurements: mRes.rows.map((m) => ({
+      id: num(m.id),
+      position: m.position,
+      cells: JSON.parse(m.cells_json),
+      lat: m.lat,
+      lon: m.lon,
+    })),
   };
 }
 
 // Update a single cell at (measurementId, columnIndex).
 // If parsedGps is provided (not undefined), the lat/lon columns are updated too.
-export function updateMeasurementCell(measurementId, columnIndex, newValue, parsedGps) {
-  const row = db
-    .prepare(`SELECT m.*, f.id AS file_id FROM measurements m JOIN files f ON f.id = m.file_id WHERE m.id = ?`)
-    .get(measurementId);
-  if (!row) return null;
+export async function updateMeasurementCell(measurementId, columnIndex, newValue, parsedGps) {
+  const rowRes = await pool.query(
+    `SELECT m.cells_json, m.lat, m.lon, m.file_id FROM measurements m WHERE m.id = $1`,
+    [measurementId]
+  );
+  if (rowRes.rows.length === 0) return null;
+  const row = rowRes.rows[0];
   const cells = JSON.parse(row.cells_json);
   while (cells.length <= columnIndex) cells.push('');
   cells[columnIndex] = newValue;
@@ -130,82 +161,77 @@ export function updateMeasurementCell(measurementId, columnIndex, newValue, pars
     }
   }
 
-  db.prepare(
-    `UPDATE measurements SET cells_json = ?, lat = ?, lon = ? WHERE id = ?`
-  ).run(JSON.stringify(cells), lat, lon, measurementId);
-
-  db.prepare(`UPDATE files SET updated_at = datetime('now') WHERE id = ?`).run(row.file_id);
+  await pool.query(
+    `UPDATE measurements SET cells_json = $1, lat = $2, lon = $3 WHERE id = $4`,
+    [JSON.stringify(cells), lat, lon, measurementId]
+  );
+  await pool.query(`UPDATE files SET updated_at = NOW() WHERE id = $1`, [row.file_id]);
 
   return { id: measurementId, cells, lat, lon };
 }
 
-export function deleteFile(id) {
-  db.prepare(`DELETE FROM files WHERE id = ?`).run(id);
+export async function deleteFile(id) {
+  await pool.query(`DELETE FROM files WHERE id = $1`, [id]);
 }
 
 // Look up the header list for the file that owns a given measurement.
-// Used to detect whether a cell edit is on the GPS column.
-export function getHeadersForMeasurement(measurementId) {
-  const row = db
-    .prepare(
-      `SELECT f.headers_json FROM measurements m
-         JOIN files f ON f.id = m.file_id
-         WHERE m.id = ?`
-    )
-    .get(measurementId);
-  if (!row) return null;
-  return JSON.parse(row.headers_json);
+export async function getHeadersForMeasurement(measurementId) {
+  const res = await pool.query(
+    `SELECT f.headers_json FROM measurements m
+       JOIN files f ON f.id = m.file_id
+      WHERE m.id = $1`,
+    [measurementId]
+  );
+  if (res.rows.length === 0) return null;
+  return JSON.parse(res.rows[0].headers_json);
 }
 
-// Return the file + measurement row for a given measurement id, so callers
-// can build a vegsystemreferanse from the row's textual columns.
-export function getMeasurementWithFile(measurementId) {
-  const row = db
-    .prepare(
-      `SELECT m.id AS m_id, m.position, m.cells_json, m.lat, m.lon,
-              f.id AS f_id, f.headers_json, f.filename
-         FROM measurements m
-         JOIN files f ON f.id = m.file_id
-         WHERE m.id = ?`
-    )
-    .get(measurementId);
-  if (!row) return null;
+// Return file + measurement row for a measurement id.
+export async function getMeasurementWithFile(measurementId) {
+  const res = await pool.query(
+    `SELECT m.id AS m_id, m.position, m.cells_json, m.lat, m.lon,
+            f.id AS f_id, f.headers_json, f.filename
+       FROM measurements m
+       JOIN files f ON f.id = m.file_id
+      WHERE m.id = $1`,
+    [measurementId]
+  );
+  if (res.rows.length === 0) return null;
+  const r = res.rows[0];
   return {
     measurement: {
-      id: row.m_id,
-      position: row.position,
-      cells: JSON.parse(row.cells_json),
-      lat: row.lat,
-      lon: row.lon,
+      id: num(r.m_id),
+      position: r.position,
+      cells: JSON.parse(r.cells_json),
+      lat: r.lat,
+      lon: r.lon,
     },
     file: {
-      id: row.f_id,
-      filename: row.filename,
-      headers: JSON.parse(row.headers_json),
+      id: num(r.f_id),
+      filename: r.filename,
+      headers: JSON.parse(r.headers_json),
     },
   };
 }
 
-// Apply a snapped position to a measurement: writes the new lat/lon AND
-// rewrites the GPS textual cell so an export matches the moved point.
-// `gpsColIndex` is the column index of the "GPS" header in this file.
-// `formattedGps` is the deg+decimal-minutes string for that column.
-export function applySnap(measurementId, gpsColIndex, formattedGps, lat, lon) {
-  const row = db
-    .prepare(
-      `SELECT m.cells_json, m.file_id FROM measurements m WHERE m.id = ?`
-    )
-    .get(measurementId);
-  if (!row) return null;
+// Apply a snapped position: writes new lat/lon AND rewrites the GPS textual
+// cell so an export matches the moved point.
+export async function applySnap(measurementId, gpsColIndex, formattedGps, lat, lon) {
+  const rowRes = await pool.query(
+    `SELECT cells_json, file_id FROM measurements WHERE id = $1`,
+    [measurementId]
+  );
+  if (rowRes.rows.length === 0) return null;
+  const row = rowRes.rows[0];
   const cells = JSON.parse(row.cells_json);
   while (cells.length <= gpsColIndex) cells.push('');
   cells[gpsColIndex] = formattedGps;
 
-  db.prepare(
-    `UPDATE measurements SET cells_json = ?, lat = ?, lon = ? WHERE id = ?`
-  ).run(JSON.stringify(cells), lat, lon, measurementId);
-
-  db.prepare(`UPDATE files SET updated_at = datetime('now') WHERE id = ?`).run(row.file_id);
+  await pool.query(
+    `UPDATE measurements SET cells_json = $1, lat = $2, lon = $3 WHERE id = $4`,
+    [JSON.stringify(cells), lat, lon, measurementId]
+  );
+  await pool.query(`UPDATE files SET updated_at = NOW() WHERE id = $1`, [row.file_id]);
 
   return { id: measurementId, cells, lat, lon };
 }

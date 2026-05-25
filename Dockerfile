@@ -9,9 +9,7 @@ WORKDIR /app/client
 COPY client/package.json client/package-lock.json* ./
 RUN rm -rf node_modules && npm install --no-audit --no-fund
 
-# Now bring in the rest of the source.
 COPY client/ ./
-# Same defensive wipe + reinstall in case any node_modules leaked through.
 RUN rm -rf node_modules && npm install --no-audit --no-fund
 
 # Call vite via `node` directly so we don't depend on the .bin/vite exec bit.
@@ -20,33 +18,24 @@ RUN node ./node_modules/vite/bin/vite.js build
 # --- Stage 2: server runtime --------------------------------------------
 FROM node:20-alpine AS runtime
 
-# better-sqlite3 needs a C toolchain at install time. Use a virtual
-# build-deps package so we can drop it again after install and keep the
-# final image small.
-RUN apk add --no-cache --virtual .build-deps python3 make g++ \
- && mkdir -p /app/server /app/client/dist /app/data
+RUN mkdir -p /app/server /app/client/dist
 
 WORKDIR /app/server
+# `pg` is pure JS — no C toolchain needed at install time (unlike the
+# SQLite branch, which needed python3/make/g++ for better-sqlite3).
 COPY server/package.json server/package-lock.json* ./
-RUN rm -rf node_modules \
- && npm install --omit=dev --no-audit --no-fund \
- && apk del .build-deps
+RUN rm -rf node_modules && npm install --omit=dev --no-audit --no-fund
 
 COPY server/ ./
-# Defensive wipe again, then reinstall production deps in case node_modules
-# leaked in with the source COPY.
-RUN rm -rf node_modules \
- && apk add --no-cache --virtual .build-deps python3 make g++ \
- && npm install --omit=dev --no-audit --no-fund \
- && apk del .build-deps
+RUN rm -rf node_modules && npm install --omit=dev --no-audit --no-fund
 
 COPY --from=client-build /app/client/dist /app/client/dist
 
 ENV NODE_ENV=production \
-    PORT=8080 \
-    PQI_DATA_DIR=/app/data
+    PORT=8080
+# DATABASE_URL must be provided at runtime (env var, set by deploy.sh /
+# docker-compose / Container App secret).
 
 EXPOSE 8080
-VOLUME ["/app/data"]
 
 CMD ["node", "index.js"]

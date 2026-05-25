@@ -1,14 +1,32 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: pqi-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: pqi
+      POSTGRES_PASSWORD: pqi
+      POSTGRES_DB: pqi
+    volumes:
+      - pqi-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pqi -d pqi"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   pqi-app:
     build: .
     image: pqi-app:latest
     container_name: pqi-app
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://pqi:pqi@postgres:5432/pqi
     ports:
       - "8080:8080"
-    volumes:
-      # Persists the SQLite database across container rebuilds.
-      - pqi-data:/app/data
 
 volumes:
-  pqi-data:
+  pqi-pgdata:
