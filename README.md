@@ -11,6 +11,14 @@ Runs as either:
 - an Azure Container App with a managed Postgres backend (one-shot
   Cloud Shell deploy).
 
+![PQI Viewer — demo file loaded, map + table](docs/demo-e6-svinesund.png)
+
+*The bundled `samples/demo-e6-svinesund.pqidat` loaded into the app:
+Kartverket topographic basemap on the left with recorded GPS (green/
+orange/red circles, coloured by compaction) and NVDB road markers
+(purple diamonds) joined by dashed pair-lines; editable per-row table
+with the "Road match" column and snap buttons on the right.*
+
 Built so a field engineer can:
 
 - upload a `.pqidat` straight off the device,
@@ -271,6 +279,8 @@ project, operator and road data that is private to the operator.)
 ├── infra/
 │   ├── main.bicep          # Azure resources: ACR, Postgres, Container Apps
 │   └── deploy.sh           # one-shot Cloud Shell deploy script
+├── docs/
+│   └── demo-e6-svinesund.png     # README screenshot
 ├── samples/
 │   └── demo-e6-svinesund.pqidat  # fabricated demo file (safe to share)
 ├── server/
