@@ -6,12 +6,12 @@
 //           (so the image can be built into ACR before the app needs it)
 //   pass 2: deployContainerApp=true   → adds the Container App
 //
-// Resources created:
-//   - Log Analytics Workspace
-//   - Azure Container Registry (ACR)
-//   - Azure Storage Account + File Share (persistent SQLite)
-//   - Container Apps Environment
-//   - Container App (pqi-viewer)   ← only in pass 2
+// Storage: NFS-protocol Azure Files on a Premium FileStorage account.
+// SMB-backed Azure Files doesn't implement the POSIX byte-range locks
+// SQLite needs (WAL mode, and even just opening the DB). NFS does, so
+// SQLite works without any application-side changes.
+// Tradeoff: Premium FileStorage requires 100 GiB minimum provisioned
+// capacity (~$16/month at LRS pricing in most regions).
 // ============================================================
 
 @description('Azure region for all resources')
@@ -59,15 +59,24 @@ resource acr 'Microsoft.ContainerRegistry/registries@2023-01-01-preview' = {
   }
 }
 
-// ── Storage Account + File Share (persistent SQLite volume) ───
+// ── Storage Account + File Share (NFS, Premium FileStorage) ───
+// kind=FileStorage + sku=Premium_LRS is the SKU required for NFS shares.
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-01-01' = {
   name: storageName
   location: location
-  kind: 'StorageV2'
-  sku: { name: 'Standard_LRS' }
+  kind: 'FileStorage'
+  sku: { name: 'Premium_LRS' }
   properties: {
+    // NFS uses port 2049 and no TLS. minimumTlsVersion only affects the
+    // REST plane (blob/file SMB); NFS traffic is unaffected.
     minimumTlsVersion: 'TLS1_2'
     allowBlobPublicAccess: false
+    // SECURITY NOTE: NFS Azure Files is network-only auth — anyone who
+    // can reach the storage endpoint AND knows both the account and share
+    // names can mount it. For a personal/team tool this is acceptable
+    // (account+share names act as a weak shared secret). To harden,
+    // VNet-integrate the Container Apps env and add a private endpoint
+    // on the storage account.
   }
 }
 
@@ -79,11 +88,15 @@ resource fileService 'Microsoft.Storage/storageAccounts/fileServices@2023-01-01'
 resource fileShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2023-01-01' = {
   parent: fileService
   name: shareName
-  properties: { shareQuota: 1 }  // 1 GiB — plenty for SQLite
+  properties: {
+    shareQuota: 100               // 100 GiB — Premium minimum
+    enabledProtocols: 'NFS'
+    rootSquash: 'NoRootSquash'    // container runs as root by default
+  }
 }
 
 // ── Container Apps Environment ────────────────────────────────
-resource containerEnv 'Microsoft.App/managedEnvironments@2023-05-01' = {
+resource containerEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
   name: envName
   location: location
   properties: {
@@ -97,22 +110,22 @@ resource containerEnv 'Microsoft.App/managedEnvironments@2023-05-01' = {
   }
 }
 
-// Attach the Azure Files share to the environment
-resource envStorage 'Microsoft.App/managedEnvironments/storages@2023-05-01' = {
+// Attach the NFS file share to the environment.
+// The `server` field encodes both account host and the NFS export path,
+// matching the same form `mount -t nfs` would use.
+resource envStorage 'Microsoft.App/managedEnvironments/storages@2024-03-01' = {
   parent: containerEnv
   name: 'pqi-data-storage'
   properties: {
-    azureFile: {
-      accountName: storageAccount.name
-      accountKey: storageAccount.listKeys().keys[0].value
-      shareName: shareName
+    nfsAzureFile: {
+      server: '${storageAccount.name}.file.${environment().suffixes.storage}:/${storageAccount.name}/${shareName}'
       accessMode: 'ReadWrite'
     }
   }
 }
 
 // ── Container App ─────────────────────────────────────────────
-resource containerApp 'Microsoft.App/containerApps@2023-05-01' = if (deployContainerApp) {
+resource containerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployContainerApp) {
   name: appContainerName
   location: location
   properties: {
@@ -161,7 +174,7 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = if (deployConta
       volumes: [
         {
           name: 'pqi-data'
-          storageType: 'AzureFile'
+          storageType: 'NfsAzureFile'
           storageName: 'pqi-data-storage'
         }
       ]
