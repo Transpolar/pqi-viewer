@@ -80,9 +80,9 @@ export default function DataTable({
         <thead>
           <tr>
             <th style={{ width: 36 }}>#</th>
-            <th style={{ width: 32 }} title="Delete row"></th>
             <th style={{ width: 230 }}>Road match</th>
             {headers.map((h, i) => <th key={i}>{h}</th>)}
+            <th style={{ width: 44 }} title="Delete row"></th>
           </tr>
         </thead>
         <tbody>
@@ -96,26 +96,6 @@ export default function DataTable({
                 onClick={() => onSelect && onSelect(m.id)}
               >
                 <td className="muted">{m.position + 1}</td>
-                <td>
-                  <button
-                    onClick={(e) => handleDelete(m, e)}
-                    disabled={deletingId === m.id}
-                    title={`Delete row ${m.position + 1}`}
-                    style={{
-                      padding: '0.05rem 0.4rem',
-                      fontSize: '0.85rem',
-                      lineHeight: 1.1,
-                      background: deletingId === m.id ? '#999' : 'transparent',
-                      color: deletingId === m.id ? 'white' : 'var(--bad)',
-                      border: '1px solid var(--bad)',
-                      borderRadius: 3,
-                      cursor: deletingId === m.id ? 'wait' : 'pointer',
-                      fontWeight: 700,
-                    }}
-                  >
-                    {deletingId === m.id ? '…' : '×'}
-                  </button>
-                </td>
                 <td>
                   <RoadMatchCell
                     measurement={m}
@@ -171,6 +151,26 @@ export default function DataTable({
                     </td>
                   );
                 })}
+                <td onClick={(e) => e.stopPropagation()}>
+                  <button
+                    onClick={(e) => handleDelete(m, e)}
+                    disabled={deletingId === m.id}
+                    title={`Delete row ${m.position + 1}`}
+                    style={{
+                      padding: '0.1rem 0.5rem',
+                      fontSize: '0.85rem',
+                      lineHeight: 1.1,
+                      background: deletingId === m.id ? '#999' : 'transparent',
+                      color: deletingId === m.id ? 'white' : 'var(--bad)',
+                      border: '1px solid var(--bad)',
+                      borderRadius: 3,
+                      cursor: deletingId === m.id ? 'wait' : 'pointer',
+                      fontWeight: 700,
+                    }}
+                  >
+                    {deletingId === m.id ? '…' : '×'}
+                  </button>
+                </td>
               </tr>
             );
           })}
