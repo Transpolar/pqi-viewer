@@ -32,7 +32,7 @@ const __dirname = path.dirname(__filename);
 
 // Bump this when you change anything user-visible. Surfaced via /api/version
 // and shown in the UI footer so the user can confirm which build is live.
-const APP_VERSION = '0.12.0-azure';
+const APP_VERSION = '0.13.0';
 const APP_BUILT  = new Date().toISOString();
 
 const app = express();
@@ -424,7 +424,7 @@ const PORT = Number(process.env.PORT) || 8080;
 initSchema()
   .then(() => {
     app.listen(PORT, () => {
-      console.log(`PQI app (azure/Postgres) listening on http://0.0.0.0:${PORT}`);
+      console.log(`PQI app listening on http://0.0.0.0:${PORT}`);
     });
   })
   .catch((err) => {

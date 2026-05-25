@@ -1,10 +1,10 @@
 // Postgres schema and helpers, async via the `pg` driver.
 //
-// This is the Azure branch — main uses better-sqlite3 against a single
-// SQLite file. Cloud-hosted Container Apps can't host a SQLite file (no
-// good shared persistent disk option), so we hit a managed Postgres
-// instead. The schema, JSON-blob columns, and lat/lon caching are kept
-// identical so the rest of the app doesn't need to know.
+// The app uses Postgres so the same image runs unchanged on a laptop
+// (via docker-compose, which boots a local Postgres alongside) or on
+// Azure Container Apps (pointing at Azure Database for PostgreSQL
+// Flexible Server). Schema is JSON-blob-heavy so the parsed PQI rows
+// round-trip back to the device byte-for-byte on export.
 import pg from 'pg';
 
 const { Pool } = pg;

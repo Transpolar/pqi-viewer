@@ -5,7 +5,7 @@
 # No local Docker or CLI setup needed.
 # ============================================================
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/Transpolar/pqi-viewer/azure/infra/deploy.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Transpolar/pqi-viewer/main/infra/deploy.sh | bash
 # ============================================================
 
 set -euo pipefail
@@ -16,7 +16,7 @@ RESOURCE_GROUP="rg-${APP_NAME}"
 LOCATION="norwayeast"
 IMAGE_TAG="latest"
 GITHUB_REPO="https://github.com/Transpolar/pqi-viewer"
-GITHUB_BRANCH="azure"              # ← Azure-flavoured branch
+GITHUB_BRANCH="main"
 # ────────────────────────────────────────────────────────────
 
 echo "▶ Step 1: Create resource group"

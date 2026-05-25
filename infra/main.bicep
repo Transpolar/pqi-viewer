@@ -1,5 +1,5 @@
 // ============================================================
-// PQI Viewer — Azure Container Apps deployment (azure branch)
+// PQI Viewer — Azure Container Apps deployment
 // ============================================================
 // Resources created:
 //   - Log Analytics Workspace

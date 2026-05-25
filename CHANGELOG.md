@@ -5,10 +5,11 @@ All notable changes to PQI Viewer are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.12.0-azure] — 2026-05-25 (azure branch)
+## [0.13.0] — 2026-05-25
 
-The `azure` branch is the cloud-hosted variant of v0.12.0. The
-user-facing app is identical; only the persistence layer differs.
+Persistence moves from SQLite to Postgres so the same image runs on
+a laptop (via docker-compose) or on Azure Container Apps without
+any platform-specific glue. User-facing app is unchanged.
 
 ### Changed
 
@@ -30,13 +31,6 @@ user-facing app is identical; only the persistence layer differs.
   lives in a real DB.
 - **infra/deploy.sh.** `GITHUB_BRANCH=azure`, otherwise the same
   two-pass flow as main.
-
-### Why this branch exists
-
-SQLite-on-Azure-Files is a square peg in a round hole — SMB volumes
-can't host the byte-range locks SQLite needs, and the NFS workaround
-costs $16/mo for 100 GiB of Premium FileStorage you don't need. A
-managed B1ms Postgres is ~$13/mo and is what the platform expects.
 
 ## [0.12.0] — 2026-05-23
 

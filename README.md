@@ -1,9 +1,15 @@
 # PQI Viewer
 
-A small self-hosted web app for viewing and editing TransTech PQI 380 asphalt
-density (`.pqidat`) files, with measurement points plotted on a Norwegian
-Kartverket map and automatic matching against the NVDB national road database
-(Statens vegvesen).
+A small web app for viewing and editing TransTech PQI 380 asphalt density
+(`.pqidat`) files, with measurement points plotted on a Norwegian Kartverket
+map and automatic matching against the NVDB national road database (Statens
+vegvesen).
+
+Runs as either:
+
+- a single-machine Docker Compose stack (your laptop, a VM, a NAS), or
+- an Azure Container App with a managed Postgres backend (one-shot
+  Cloud Shell deploy).
 
 Built so a field engineer can:
 
@@ -19,7 +25,7 @@ Built so a field engineer can:
 
 ### Library + upload
 
-- Drop a `.pqidat` on the upload area; it's parsed, stored in SQLite, and
+- Drop a `.pqidat` on the upload area; it's parsed, stored in Postgres, and
   appears in the file list. Files persist across container restarts.
 
 ### Map (Kartverket + Esri)
@@ -102,7 +108,7 @@ newline. Round-trip with the device's own files is byte-for-byte identical.
 - Every request is logged to stdout with method, path, status and duration —
   helpful when diagnosing snap behaviour.
 
-## Quick start
+## Quick start (self-hosted)
 
 ### Docker Compose (recommended)
 
@@ -110,8 +116,10 @@ newline. Round-trip with the device's own files is byte-for-byte identical.
 docker compose up --build -d
 ```
 
-Open <http://localhost:8080>. SQLite lives in the named volume `pqi-data`
-and survives container rebuilds.
+This starts two containers: `pqi-app` on http://localhost:8080 and
+`postgres:16-alpine` as the database. Postgres data lives in the named
+volume `pqi-pgdata` and survives container rebuilds. The app waits on a
+`pg_isready` healthcheck before booting, so the first `up` is clean.
 
 Stop (keep data):
 
@@ -125,21 +133,27 @@ Stop and wipe data:
 docker compose down -v
 ```
 
-### Plain Docker
+### Plain Docker (you bring your own Postgres)
 
 ```bash
 docker build -t pqi-app .
-docker run -d --name pqi-app -p 8080:8080 -v pqi-data:/app/data pqi-app
+docker run -d --name pqi-app -p 8080:8080 \
+  -e DATABASE_URL='postgres://user:pw@host:5432/pqi' \
+  pqi-app
 ```
 
 ### Local dev
+
+You need Postgres running somewhere — the easiest path is `docker compose up
+postgres -d` then talk to it on `localhost:5432`.
 
 Backend:
 
 ```bash
 cd server
 npm install
-npm run dev          # http://localhost:8080
+DATABASE_URL='postgres://pqi:pqi@localhost:5432/pqi' npm run dev
+# API on http://localhost:8080
 ```
 
 Frontend (separate terminal):
@@ -150,9 +164,55 @@ npm install
 npm run dev          # http://localhost:5173 (proxies /api → :8080)
 ```
 
+## Cloud deployment (Azure Container Apps)
+
+One-shot deploy from Azure Cloud Shell (portal.azure.com → Cloud Shell). No
+local Docker, az CLI, or Bicep tooling needed:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Transpolar/pqi-viewer/main/infra/deploy.sh | bash
+```
+
+What it provisions in `rg-pqiviewer` (defaults to Norway East):
+
+- Azure Container Registry (Basic SKU)
+- Azure Database for PostgreSQL Flexible Server (`Standard_B1ms`, 32 GiB, PG 16)
+- Log Analytics workspace
+- Container Apps Environment + Container App (public HTTPS, `min=0 max=2` replicas, scales to zero when idle)
+
+The script runs in two Bicep passes around an `az acr build` so the image
+exists before the Container App tries to pull it. Idempotent — rerun it
+after pushing a code change to redeploy.
+
+**Cost:** ≈ $13/mo Postgres (B1ms, can't go lower) + ≈ $5/mo Basic ACR +
+≈ free Container App = **~$18-20/mo idle**. More while serving traffic. Tear
+down everything with:
+
+```bash
+az group delete --name rg-pqiviewer --yes
+```
+
+After a deploy you'll see commands at the bottom of the output for tailing
+container logs, connecting to Postgres via `psql`, and rebuilding the image
+without re-running the full Bicep.
+
+See `infra/main.bicep` and `infra/deploy.sh` for the full template.
+
+## Demo file
+
+`samples/demo-e6-svinesund.pqidat` is a fully fabricated 10-row file
+along Europavei 6 north of the Svinesund border crossing. Every row is
+300 m apart along the road; each row's GPS is intentionally offset
+10–40 m from its NVDB road marker so loading it into the app
+immediately demonstrates the per-row Snap, **Snap all**, and the
+green/orange/red compaction colouring. Project, operator and contact
+fields are placeholders (`DEMO_PROJECT`, `NN`, etc.) — no real operator
+data.
+
 ## How to use it (typical workflow)
 
-1. Open the app, drag a `.pqidat` onto the upload box.
+1. Open the app, drag a `.pqidat` onto the upload box (try
+   `samples/demo-e6-svinesund.pqidat` for a guided tour).
 2. Click the new file in the library to open the detail view.
 3. Look at the map. Any row whose purple diamond is far from its green circle
    is a candidate for snapping.
@@ -190,23 +250,32 @@ project, operator and road data that is private to the operator.)
 
 ## Tech stack
 
-- **Backend:** Node.js 20, Express, `better-sqlite3`, `multer`.
+- **Backend:** Node.js 20, Express, `pg`, `multer`.
 - **Frontend:** React 18, Vite, Leaflet, react-leaflet.
 - **Maps:** Kartverket WMTS (topo) + Esri World Imagery (satellite) +
   CartoDB Voyager labels (hybrid overlay).
 - **Road database:** [NVDB API LES v4](https://nvdbapiles.atlas.vegvesen.no/)
   (`X-Client: pqi-viewer`).
-- **DB:** SQLite (one file in `/app/data` inside the container).
+- **DB:** Postgres 16. Local dev runs `postgres:16-alpine` in
+  docker-compose; cloud deploys use Azure Database for PostgreSQL
+  Flexible Server (B1ms).
+- **Infra (cloud):** Azure Container Apps + ACR + Postgres Flexible
+  Server, defined in Bicep (`infra/main.bicep`).
 
 ## Layout
 
 ```
 .
 ├── Dockerfile              # multi-stage: client build → server runtime
-├── docker-compose.yml
+├── docker-compose.yml      # app + postgres for local self-hosting
+├── infra/
+│   ├── main.bicep          # Azure resources: ACR, Postgres, Container Apps
+│   └── deploy.sh           # one-shot Cloud Shell deploy script
+├── samples/
+│   └── demo-e6-svinesund.pqidat  # fabricated demo file (safe to share)
 ├── server/
 │   ├── index.js            # Express + REST API + request logger
-│   ├── db.js               # SQLite schema + helpers
+│   ├── db.js               # Postgres schema + async helpers
 │   ├── pqi.js              # PQI parser + serializer (byte-perfect round-trip)
 │   ├── roadref.js          # NVDB reference assembly + kommune inference
 │   ├── nvdb.js             # NVDB API client + haversine distance
@@ -246,11 +315,13 @@ project, operator and road data that is private to the operator.)
 ## Privacy / data handling
 
 - `.pqidat` files often contain project, operator and GPS information that
-  the company considers sensitive. They live only in the SQLite database
+  the company considers sensitive. They live only in the Postgres database
   inside your deployment — the app does not send file contents anywhere
   except to NVDB (which only ever sees an assembled road reference string,
   never the file).
-- `.pqidat` is in `.gitignore`. Don't commit operator data.
+- `.pqidat` is in `.gitignore`. Don't commit operator data. The only
+  exception, allowed via `!samples/*.pqidat`, is the fabricated demo file
+  under `samples/`.
 
 ## Notes on map tile licensing
 

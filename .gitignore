@@ -13,3 +13,5 @@ data
 
 # Never commit operator data — .pqidat files are private.
 *.pqidat
+# Exception: anonymised demo files in samples/ are safe to ship.
+!samples/*.pqidat
