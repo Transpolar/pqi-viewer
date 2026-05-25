@@ -38,8 +38,11 @@ param deployContainerApp bool = true
 @description('Postgres admin username')
 param pgAdminUser string = 'pqiadmin'
 
-@description('Postgres admin password. Defaults to a deterministic value derived from the resource group id so reruns of the same deploy hit the same password.')
+@description('Postgres admin password. Defaults to a deterministic value derived from the resource group id so reruns of the same deploy hit the same password. Override with --parameters pgAdminPassword=... to rotate.')
 @secure()
+// The deterministic default is intentional (no-prompt deploys). Suppress
+// the linter's blanket warning against defaults on secure params.
+#disable-next-line secure-parameter-default
 param pgAdminPassword string = '${uniqueString(resourceGroup().id, 'pqi-pg')}Aa1!'
 
 // ── Derived names ────────────────────────────────────────────
