@@ -16,11 +16,25 @@ export default function DataTable({
   onSelect,
   onCellEdited,
   onSnapOne,
+  onDeleteRow,
 }) {
   const [editing, setEditing] = useState(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
   const [snappingId, setSnappingId] = useState(null);
+  const [deletingId, setDeletingId] = useState(null);
+
+  const handleDelete = async (m, e) => {
+    if (e) e.stopPropagation();
+    const rowNum = m.position + 1;
+    if (!confirm(`Delete row ${rowNum}? This removes it from the file and can't be undone (re-upload the original .pqidat to restore).`)) return;
+    setDeletingId(m.id);
+    try {
+      await onDeleteRow(m.id, rowNum);
+    } finally {
+      setDeletingId(null);
+    }
+  };
 
   const compactionIdx = headers.findIndex((h) => h.trim().toLowerCase() === 'kompaktering');
 
@@ -66,6 +80,7 @@ export default function DataTable({
         <thead>
           <tr>
             <th style={{ width: 36 }}>#</th>
+            <th style={{ width: 32 }} title="Delete row"></th>
             <th style={{ width: 230 }}>Road match</th>
             {headers.map((h, i) => <th key={i}>{h}</th>)}
           </tr>
@@ -81,6 +96,26 @@ export default function DataTable({
                 onClick={() => onSelect && onSelect(m.id)}
               >
                 <td className="muted">{m.position + 1}</td>
+                <td>
+                  <button
+                    onClick={(e) => handleDelete(m, e)}
+                    disabled={deletingId === m.id}
+                    title={`Delete row ${m.position + 1}`}
+                    style={{
+                      padding: '0.05rem 0.4rem',
+                      fontSize: '0.85rem',
+                      lineHeight: 1.1,
+                      background: deletingId === m.id ? '#999' : 'transparent',
+                      color: deletingId === m.id ? 'white' : 'var(--bad)',
+                      border: '1px solid var(--bad)',
+                      borderRadius: 3,
+                      cursor: deletingId === m.id ? 'wait' : 'pointer',
+                      fontWeight: 700,
+                    }}
+                  >
+                    {deletingId === m.id ? '…' : '×'}
+                  </button>
+                </td>
                 <td>
                   <RoadMatchCell
                     measurement={m}

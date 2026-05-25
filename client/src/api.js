@@ -26,6 +26,8 @@ export const api = {
     }).then(jsonOrThrow),
   deleteFile: (id) =>
     fetch(`/api/files/${id}`, { method: 'DELETE' }).then(jsonOrThrow),
+  deleteMeasurement: (id) =>
+    fetch(`/api/measurements/${id}`, { method: 'DELETE' }).then(jsonOrThrow),
   exportUrl: (id) => `/api/files/${id}/export`,
   roadPositions: (id) => fetch(`/api/files/${id}/road-positions`).then(jsonOrThrow),
   snapOne: (measurementId, manualRef) =>

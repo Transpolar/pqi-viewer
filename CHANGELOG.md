@@ -5,6 +5,17 @@ All notable changes to PQI Viewer are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.1] — 2026-05-25
+
+### Added
+
+- **Per-row delete.** New `×` button in the data table next to the row
+  number. Removes the row from the file with a confirm prompt, the
+  table and map markers update immediately, and the export now omits
+  the deleted row. Surviving rows keep their original `position`
+  values (no renumbering) so the export serializer is unaffected.
+  Wired up by a new `DELETE /api/measurements/:id` endpoint.
+
 ## [0.13.0] — 2026-05-25
 
 Persistence moves from SQLite to Postgres so the same image runs on

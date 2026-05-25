@@ -13,6 +13,7 @@ import {
   getFile,
   updateMeasurementCell,
   deleteFile,
+  deleteMeasurement,
   getHeadersForMeasurement,
   getMeasurementWithFile,
   applySnap,
@@ -32,7 +33,7 @@ const __dirname = path.dirname(__filename);
 
 // Bump this when you change anything user-visible. Surfaced via /api/version
 // and shown in the UI footer so the user can confirm which build is live.
-const APP_VERSION = '0.13.0';
+const APP_VERSION = '0.13.1';
 const APP_BUILT  = new Date().toISOString();
 
 const app = express();
@@ -202,6 +203,21 @@ app.patch('/api/measurements/:id', async (req, res, next) => {
     const updated = await updateMeasurementCell(id, columnIndex, value, parsedGps);
     if (!updated) return res.status(404).json({ error: 'measurement not found' });
     res.json(updated);
+  } catch (err) { next(err); }
+});
+
+// DELETE /api/measurements/:id
+// Remove one row from a file. The map view, the table row, and the file's
+// measurement count all update on the next reload. Position values for the
+// surviving rows are not renumbered — the export serializer reads them in
+// position order but doesn't require contiguous numbering.
+app.delete('/api/measurements/:id', async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    const result = await deleteMeasurement(id);
+    if (!result) return res.status(404).json({ error: 'measurement not found' });
+    console.log(`[delete] m${id} (file ${result.fileId})`);
+    res.json({ ok: true, fileId: result.fileId });
   } catch (err) { next(err); }
 });
 

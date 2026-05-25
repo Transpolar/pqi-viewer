@@ -174,6 +174,22 @@ export async function deleteFile(id) {
   await pool.query(`DELETE FROM files WHERE id = $1`, [id]);
 }
 
+// Delete a single measurement row. Returns the parent file id so the
+// caller can flush any per-file caches, or null if the id didn't exist.
+// The remaining rows keep their original `position` values so previously
+// computed indexes (e.g. the "#" column in the UI) stay stable; the
+// export serializer doesn't depend on position being contiguous.
+export async function deleteMeasurement(id) {
+  const res = await pool.query(
+    `DELETE FROM measurements WHERE id = $1 RETURNING file_id`,
+    [id]
+  );
+  if (res.rows.length === 0) return null;
+  const fileId = num(res.rows[0].file_id);
+  await pool.query(`UPDATE files SET updated_at = NOW() WHERE id = $1`, [fileId]);
+  return { fileId };
+}
+
 // Look up the header list for the file that owns a given measurement.
 export async function getHeadersForMeasurement(measurementId) {
   const res = await pool.query(

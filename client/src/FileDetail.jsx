@@ -70,6 +70,25 @@ export default function FileDetail({ fileId }) {
     }));
   };
 
+  const handleDeleteRow = async (measurementId, rowNum) => {
+    try {
+      await api.deleteMeasurement(measurementId);
+      // Optimistic local update so the row disappears immediately. The
+      // reload() below brings the authoritative state back from the server
+      // and refreshes road-position lookups for the surviving rows.
+      setFile((prev) => prev && ({
+        ...prev,
+        measurements: prev.measurements.filter((m) => m.id !== measurementId),
+      }));
+      if (selectedId === measurementId) setSelectedId(null);
+      await reload();
+      flash('ok', `✓ Row ${rowNum} deleted.`);
+    } catch (e) {
+      console.error('[delete-row] failed', e);
+      flash('err', `Delete failed: ${e.message}`);
+    }
+  };
+
   const onSnapOne = async (measurementId, manualRef) => {
     const url = `/api/measurements/${measurementId}/snap`;
     console.log('[snap] POST', url, manualRef ? `(manual ref: ${manualRef})` : '');
@@ -249,6 +268,7 @@ export default function FileDetail({ fileId }) {
             onSelect={setSelectedId}
             onCellEdited={handleCellEdited}
             onSnapOne={onSnapOne}
+            onDeleteRow={handleDeleteRow}
           />
         </div>
       </div>
