@@ -235,3 +235,17 @@ input:focus, select:focus, textarea:focus {
 }
 .captures-list .cap .c-code { font-weight: 700; font-family: ui-monospace, monospace; }
 .captures-list .cap .c-road { color: var(--muted); flex: 1; text-align: right; }
+.captures-list .cap .c-del {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0 0.5rem;
+  min-height: 28px;
+  min-width: 32px;
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1;
+}
+.captures-list .cap .c-del:hover { color: var(--bad); border-color: var(--bad); }
+.captures-list .cap .c-del:disabled { opacity: 0.5; cursor: wait; }

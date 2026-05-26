@@ -29,4 +29,13 @@ export const api = {
     }).then(json),
   deleteCapture: (id) =>
     fetch(`/api/captures/${id}`, { method: 'DELETE' }).then(json),
+  // Reverse NVDB lookup. Returns the road context for a lat/lon, or
+  // null if no road is within the search radius (server replies 404).
+  roadPositionAt: (lat, lon) =>
+    fetch(`/api/road-position?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`)
+      .then(async (res) => {
+        if (res.status === 404) return null;
+        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+        return res.json();
+      }),
 };

@@ -5,6 +5,33 @@ All notable changes to PQI Viewer are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] — 2026-05-26
+
+### Added
+
+- **Live NVDB road context on the mobile capture screen.** Two
+  debounced reverse-NVDB lookups now run continuously:
+  - "Your road" — fired when the operator has moved more than ~5 m
+    since the last lookup, capped at one request per second. Shows
+    which `vegsystemreferanse` the live blue dot is on, plus how many
+    metres off the centreline they are.
+  - "Marker road" — fired ~½ second after the operator stops dragging
+    the capture pin. Shows the road the saved capture will end up on,
+    so the operator can see immediately whether their nudge landed on
+    the right street.
+  Both readouts handle the "no road within 200 m" and "NVDB error"
+  cases gracefully — they render as muted hints, not blocking errors.
+- **Per-capture delete button** on the captures list under the map.
+  Tap the trailing `×`, confirm, and the row is removed from the
+  shared DB; the list reloads immediately. Uses the existing
+  `DELETE /api/captures/:id` endpoint.
+
+### Changed
+
+- `/api/road-position` moved into the shared API router so both the
+  desktop port (8080) and the mobile port (8081) serve it. The desktop
+  map-click probe still works exactly as before.
+
 ## [0.14.2] — 2026-05-26
 
 ### Fixed

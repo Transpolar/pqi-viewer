@@ -30,6 +30,36 @@ function MapCommander({ recenterRequest, zoom }) {
   return null;
 }
 
+// Small status component for the live / marker NVDB readout. The
+// `road` prop carries:
+//   - undefined  → lookup in flight
+//   - null       → server returned 404 (no road within search radius)
+//   - { error }  → network / NVDB error
+//   - object     → success ({ kortform, distance_m, kommune, ... })
+function RoadReadout({ road, prefix }) {
+  if (road === undefined) {
+    return <span className="muted"><strong>{prefix}:</strong> checking NVDB…</span>;
+  }
+  if (road === null) {
+    return <span className="muted"><strong>{prefix}:</strong> no road within 200 m</span>;
+  }
+  if (road && road.error) {
+    return <span style={{ color: 'var(--bad)' }}><strong>{prefix}:</strong> {road.error}</span>;
+  }
+  return (
+    <span>
+      <strong>{prefix}:</strong> {road.kortform || road.ref || '—'}
+      {road.distance_m != null && (
+        <span className="muted">
+          {' '}· {road.distance_m < 1
+            ? `${(road.distance_m * 100).toFixed(0)} cm`
+            : `${road.distance_m.toFixed(0)} m`} off road
+        </span>
+      )}
+    </span>
+  );
+}
+
 // Haversine distance (m) — used to show the gap between the operator's
 // live position and the manually-adjusted capture marker.
 function haversineM(a, b) {
@@ -69,10 +99,18 @@ export default function CaptureScreen({ projectId, onBack }) {
   // GPS fix; from then on it's manual until they tap "My location".
   const [marker, setMarker] = useState(null);
 
+  // Live + marker NVDB road context. Each is { kortform, distance_m,
+  // kommune, ... } when a road is within range, null when there isn't
+  // one within NVDB's 200 m search radius, an { error } object on
+  // network failure, or undefined while a lookup is in flight.
+  const [liveRoad, setLiveRoad]     = useState(undefined);
+  const [markerRoad, setMarkerRoad] = useState(undefined);
+
   // Pure UI bits.
   const [saving, setSaving] = useState(false);
   const [showCode, setShowCode] = useState(null); // capture result post-save
   const [recenterRequest, setRecenterRequest] = useState(null);
+  const [deletingCaptureId, setDeletingCaptureId] = useState(null);
 
   const reloadProject = () => {
     api.getProject(projectId).then(setProject).catch((e) => setError(e.message));
@@ -130,10 +168,68 @@ export default function CaptureScreen({ projectId, onBack }) {
     return () => navigator.geolocation.clearWatch(watchId);
   }, []);
 
+  // Debounced reverse-NVDB lookup for the live position. We refresh
+  // whenever the dot has moved more than a few metres, capped at one
+  // request per second, so a stationary phone doesn't spam NVDB and a
+  // walking operator gets fresh road context every couple of seconds.
+  const liveSeqRef = useRef(0);
+  const lastLiveLookupRef = useRef(null); // [lat, lon] of last fired lookup
+  useEffect(() => {
+    if (!livePos) return;
+    // Skip if we already looked up basically this point.
+    if (
+      lastLiveLookupRef.current &&
+      haversineM(lastLiveLookupRef.current, livePos) < 5
+    ) return;
+    const seq = ++liveSeqRef.current;
+    const t = setTimeout(async () => {
+      lastLiveLookupRef.current = livePos;
+      try {
+        const r = await api.roadPositionAt(livePos[0], livePos[1]);
+        if (liveSeqRef.current === seq) setLiveRoad(r);
+      } catch (e) {
+        if (liveSeqRef.current === seq) setLiveRoad({ error: e.message });
+      }
+    }, 1000);
+    return () => clearTimeout(t);
+  }, [livePos?.[0], livePos?.[1]]);
+
+  // Same idea for the draggable marker — fires after the user stops
+  // moving it for half a second.
+  const markerSeqRef = useRef(0);
+  useEffect(() => {
+    if (!marker) return;
+    const seq = ++markerSeqRef.current;
+    setMarkerRoad(undefined); // show "checking…" while we wait
+    const t = setTimeout(async () => {
+      try {
+        const r = await api.roadPositionAt(marker[0], marker[1]);
+        if (markerSeqRef.current === seq) setMarkerRoad(r);
+      } catch (e) {
+        if (markerSeqRef.current === seq) setMarkerRoad({ error: e.message });
+      }
+    }, 500);
+    return () => clearTimeout(t);
+  }, [marker?.[0], marker?.[1]]);
+
   const onRecenter = () => {
     if (!livePos) return;
     setMarker(livePos);
     setRecenterRequest([livePos[0] + Math.random() * 1e-9, livePos[1]]); // perturb so React sees a change even if pos identical
+  };
+
+  const onDeleteCapture = async (cap) => {
+    if (!confirm(`Delete capture ${cap.code} (${cap.kortform || cap.road_ref || 'no road match'})?`)) return;
+    setDeletingCaptureId(cap.id);
+    setError(null);
+    try {
+      await api.deleteCapture(cap.id);
+      reloadProject();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setDeletingCaptureId(null);
+    }
   };
 
   const onSave = async () => {
@@ -272,6 +368,9 @@ export default function CaptureScreen({ projectId, onBack }) {
               </>
             : <span className="muted">No position yet</span>}
         </div>
+        <div className="road">
+          <RoadReadout road={markerRoad} prefix="Marker road" />
+        </div>
         <div className="coords" style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
           <span style={{
             display: 'inline-block', width: 10, height: 10, borderRadius: '50%',
@@ -282,6 +381,11 @@ export default function CaptureScreen({ projectId, onBack }) {
             ? <>You: {livePos[0].toFixed(6)}, {livePos[1].toFixed(6)}{accuracy != null && <span className="muted"> · ±{Math.round(accuracy)} m</span>}{heading != null && <span className="muted"> · {Math.round(heading)}°</span>}</>
             : <span className="muted">{gpsStatus === 'starting' ? 'acquiring GPS…' : 'GPS off'}</span>}
         </div>
+        {livePos && (
+          <div className="road">
+            <RoadReadout road={liveRoad} prefix="Your road" />
+          </div>
+        )}
         <div className="capture-actions">
           <button className="ghost" onClick={onRecenter} disabled={!livePos}>
             ⌖ My location
@@ -297,6 +401,15 @@ export default function CaptureScreen({ projectId, onBack }) {
               <div key={c.id} className="cap">
                 <span className="c-code">{c.code}</span>
                 <span className="c-road">{c.kortform || c.road_ref || 'no road match'}</span>
+                <button
+                  className="c-del"
+                  aria-label={`Delete capture ${c.code}`}
+                  disabled={deletingCaptureId === c.id}
+                  onClick={() => onDeleteCapture(c)}
+                  title="Delete capture"
+                >
+                  {deletingCaptureId === c.id ? '…' : '×'}
+                </button>
               </div>
             ))}
           </div>

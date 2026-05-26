@@ -41,7 +41,7 @@ const __dirname = path.dirname(__filename);
 
 // Bump this when you change anything user-visible. Surfaced via /api/version
 // and shown in the UI footer so the user can confirm which build is live.
-const APP_VERSION = '0.14.2';
+const APP_VERSION = '0.15.0';
 const APP_BUILT  = new Date().toISOString();
 
 const app = express();
@@ -219,6 +219,23 @@ function registerSharedApi(targetApp) {
     try {
       await deleteCapture(Number(req.params.id));
       res.json({ ok: true });
+    } catch (err) { next(err); }
+  });
+
+  // Reverse NVDB lookup for an arbitrary lat/lon. Used by both the
+  // desktop map's click probe and the mobile capture screen's live
+  // road readout.
+  targetApp.get('/api/road-position', async (req, res, next) => {
+    try {
+      const lat = Number(req.query.lat);
+      const lon = Number(req.query.lon);
+      const maxDist = req.query.maks_avstand ? Number(req.query.maks_avstand) : 200;
+      if (!isFinite(lat) || !isFinite(lon)) {
+        return res.status(400).json({ error: 'lat and lon (numbers) required' });
+      }
+      const result = await lookupPosition(lat, lon, maxDist);
+      if (result.error) return res.status(404).json({ error: result.error });
+      res.json(result);
     } catch (err) { next(err); }
   });
 }
@@ -541,19 +558,9 @@ app.post('/api/files/:id/snap-all', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-app.get('/api/road-position', async (req, res, next) => {
-  try {
-    const lat = Number(req.query.lat);
-    const lon = Number(req.query.lon);
-    const maxDist = req.query.maks_avstand ? Number(req.query.maks_avstand) : 200;
-    if (!isFinite(lat) || !isFinite(lon)) {
-      return res.status(400).json({ error: 'lat and lon (numbers) required' });
-    }
-    const result = await lookupPosition(lat, lon, maxDist);
-    if (result.error) return res.status(404).json({ error: result.error });
-    res.json(result);
-  } catch (err) { next(err); }
-});
+// /api/road-position moved into registerSharedApi so both desktop and
+// mobile ports answer it (mobile uses it to show live NVDB context as
+// the operator moves and as they drag the capture marker).
 
 // --- Export -------------------------------------------------------------
 
