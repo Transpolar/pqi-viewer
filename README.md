@@ -11,6 +11,9 @@ Runs as either:
 - an Azure Container App with a managed Postgres backend (one-shot
   Cloud Shell deploy).
 
+Ships with a **mobile companion app** on a second port for the operator's
+phone — see the [Mobile companion](#mobile-companion) section.
+
 ![PQI Viewer — demo file loaded, map + table](docs/demo-e6-svinesund.png)
 
 *The bundled `samples/demo-e6-svinesund.pqidat` loaded into the app:
@@ -172,6 +175,37 @@ npm install
 npm run dev          # http://localhost:5173 (proxies /api → :8080)
 ```
 
+## Mobile companion
+
+A phone-friendly capture flow lives on the same container image on
+**port 8081** (Azure publishes it as a separate Container App with its
+own HTTPS URL — required so browser geolocation works without extra
+setup).
+
+![PQI Capture — mobile capture screen on the svinesund project](docs/mobile-capture.png)
+
+Field workflow:
+
+1. Phone opens the mobile URL (`http://pqi-host:8081/` locally, or the
+   `mobileAppUrl` from `deploy.sh` on Azure), picks or creates a project.
+2. Kartverket topo map centres on the browser's geolocation; the marker
+   is **draggable** so the operator can nudge it to where the
+   measurement will actually happen.
+3. Tap **Save capture**. The server reverse-looks-up that lat/lon
+   against NVDB and mints the next per-project 2-digit code (`00`,
+   `01`, …). A modal shows the code in big text.
+4. Operator types the code into the PQI device's **Beskrivelse1** cell,
+   then takes the asphalt density measurement.
+5. Back at base: upload the `.pqidat` into the same project from the
+   desktop UI. The server joins each row to its capture by the
+   Beskrivelse1 code and pre-fills `Sted på veien`, `Beskrivelse2` and
+   `GPS` from the capture's resolved NVDB position. Rows whose code
+   doesn't match a capture are imported unchanged.
+
+The desktop and mobile bundles share the same Postgres, the same NVDB
+client, and the same projects/captures REST API — they just present
+two different UIs from the same Node process.
+
 ## Cloud deployment (Azure Container Apps)
 
 One-shot deploy from Azure Cloud Shell (portal.azure.com → Cloud Shell). No
@@ -267,8 +301,13 @@ project, operator and road data that is private to the operator.)
 - **DB:** Postgres 16. Local dev runs `postgres:16-alpine` in
   docker-compose; cloud deploys use Azure Database for PostgreSQL
   Flexible Server (B1ms).
+- **Mobile companion:** standalone Vite+React bundle in `mobile/client/`,
+  served from the same Node process on port 8081, shares the Postgres
+  + NVDB client with the desktop.
 - **Infra (cloud):** Azure Container Apps + ACR + Postgres Flexible
-  Server, defined in Bicep (`infra/main.bicep`).
+  Server, defined in Bicep (`infra/main.bicep`). Desktop and mobile
+  get their own Container Apps on the same env so each gets its own
+  HTTPS URL.
 
 ## Layout
 
@@ -280,9 +319,21 @@ project, operator and road data that is private to the operator.)
 │   ├── main.bicep          # Azure resources: ACR, Postgres, Container Apps
 │   └── deploy.sh           # one-shot Cloud Shell deploy script
 ├── docs/
-│   └── demo-e6-svinesund.png     # README screenshot
+│   ├── demo-e6-svinesund.png     # README screenshot (desktop)
+│   └── mobile-capture.png        # README screenshot (mobile)
 ├── samples/
 │   └── demo-e6-svinesund.pqidat  # fabricated demo file (safe to share)
+├── mobile/
+│   └── client/             # phone-side Vite+React capture app
+│       ├── index.html
+│       ├── vite.config.js
+│       └── src/
+│           ├── main.jsx
+│           ├── App.jsx     # hash router (#/, #/p/:id)
+│           ├── ProjectPicker.jsx
+│           ├── CaptureScreen.jsx
+│           ├── api.js
+│           └── styles.css
 ├── server/
 │   ├── index.js            # Express + REST API + request logger
 │   ├── db.js               # Postgres schema + async helpers
