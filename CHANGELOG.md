@@ -5,6 +5,37 @@ All notable changes to PQI Viewer are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.2] — 2026-05-26
+
+### Fixed
+
+- **Live location was invisible** when the operator hadn't moved yet.
+  The blue dot + accuracy ring were rendered into Leaflet's default
+  `overlayPane` (z-index 400) while the draggable pin lives in
+  `markerPane` (z-index 600), so any time the live position coincided
+  with the pin (which is the default state right after the first GPS
+  fix, since the marker is seeded at livePos), the pin completely
+  covered the dot. The live elements now render into a custom pane
+  with z-index 650, so they sit visibly above the pin even when
+  coincident. Also bumped the dot radius from 8→9 px, the accuracy
+  ring's opacity from 0.12→0.18, and gave the ring a 6-m floor so it's
+  visible even on a sharp fix.
+
+## [0.14.1] — 2026-05-26
+
+### Added
+
+- **Live location on the mobile capture map.** Geolocation switched from
+  a one-shot `getCurrentPosition` to a continuous `watchPosition`
+  watcher. A blue dot + translucent accuracy ring on the map updates as
+  the operator moves, while the draggable capture marker stays
+  independent (drag it to fine-tune the spot, then tap the **⌖ My
+  location** floating button to snap it back to your live position).
+  The status bar under the map now shows live coords with ± accuracy
+  and (when reported) heading, and the marker readout shows how many
+  metres it's been nudged from your current position. The GPS watcher
+  is `clearWatch`'d on screen unmount so the radio doesn't stay hot.
+
 ## [0.14.0] — 2026-05-26
 
 ### Added
