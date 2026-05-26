@@ -27,7 +27,9 @@ pool.on('error', (err) => {
 });
 
 // Idempotent schema init. Called once at startup from index.js before
-// app.listen(). Mirrors the SQLite schema in main/server/db.js.
+// app.listen(). The mobile companion (mobile/server/index.js) calls the
+// same initSchema() at boot, so the projects/captures tables get created
+// regardless of which service starts first.
 export async function initSchema() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS files (
@@ -52,6 +54,52 @@ export async function initSchema() {
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_measurements_file ON measurements(file_id)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_measurements_file_pos ON measurements(file_id, position)`);
+
+  // Companion-app tables. A `project` is just a named bucket the operator
+  // selects on both devices (mobile companion + PQI 380). The mobile app
+  // creates `captures` against a project — each capture is a GPS point
+  // turned into an NVDB road reference, and is assigned a 2-digit `code`
+  // (unique per project). The operator types that code into the PQI
+  // device's Beskrivelse1 cell while taking a measurement.
+  //
+  // On the desktop side, when a .pqidat is uploaded INTO a project, the
+  // server joins rows to captures on (project_id, code) and writes the
+  // capture's road ref + GPS into the row — saving the operator from
+  // typing road codes on the device.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS projects (
+      id          BIGSERIAL PRIMARY KEY,
+      name        TEXT NOT NULL UNIQUE,
+      notes       TEXT,
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS captures (
+      id          BIGSERIAL PRIMARY KEY,
+      project_id  BIGINT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      code        TEXT NOT NULL,
+      lat         DOUBLE PRECISION NOT NULL,
+      lon         DOUBLE PRECISION NOT NULL,
+      road_ref    TEXT,
+      kortform    TEXT,
+      road_lat    DOUBLE PRECISION,
+      road_lon    DOUBLE PRECISION,
+      notes       TEXT,
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (project_id, code)
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_captures_project ON captures(project_id)`);
+
+  // Allow files to be tagged to the project they belong to. Nullable so
+  // legacy uploads (created before this feature) keep working unchanged.
+  await pool.query(`
+    ALTER TABLE files
+       ADD COLUMN IF NOT EXISTS project_id BIGINT REFERENCES projects(id) ON DELETE SET NULL
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_files_project ON files(project_id)`);
 }
 
 // pg returns BIGSERIAL ids as JS strings (numbers >2^53 can't be JS
@@ -228,6 +276,171 @@ export async function getMeasurementWithFile(measurementId) {
       headers: JSON.parse(r.headers_json),
     },
   };
+}
+
+// --- Projects + captures (companion-app domain) -------------------------
+
+export async function listProjects() {
+  const res = await pool.query(`
+    SELECT p.id, p.name, p.notes, p.created_at,
+           (SELECT COUNT(*) FROM captures c WHERE c.project_id = p.id) AS capture_count,
+           (SELECT COUNT(*) FROM files    f WHERE f.project_id = p.id) AS file_count
+      FROM projects p
+     ORDER BY p.created_at DESC
+  `);
+  return res.rows.map((r) => ({
+    id: num(r.id),
+    name: r.name,
+    notes: r.notes,
+    created_at: iso(r.created_at),
+    capture_count: num(r.capture_count),
+    file_count: num(r.file_count),
+  }));
+}
+
+export async function createProject(name, notes) {
+  const res = await pool.query(
+    `INSERT INTO projects (name, notes) VALUES ($1, $2) RETURNING id, name, notes, created_at`,
+    [String(name).trim(), notes == null ? null : String(notes)]
+  );
+  const r = res.rows[0];
+  return { id: num(r.id), name: r.name, notes: r.notes, created_at: iso(r.created_at) };
+}
+
+export async function getProject(id) {
+  const pRes = await pool.query(`SELECT * FROM projects WHERE id = $1`, [id]);
+  if (pRes.rows.length === 0) return null;
+  const p = pRes.rows[0];
+  const cRes = await pool.query(
+    `SELECT id, code, lat, lon, road_ref, kortform, road_lat, road_lon, notes, created_at
+       FROM captures WHERE project_id = $1 ORDER BY code ASC`,
+    [id]
+  );
+  const fRes = await pool.query(
+    `SELECT id, filename, uploaded_at, updated_at,
+            (SELECT COUNT(*) FROM measurements m WHERE m.file_id = f.id) AS measurement_count
+       FROM files f WHERE f.project_id = $1 ORDER BY f.uploaded_at DESC`,
+    [id]
+  );
+  return {
+    id: num(p.id),
+    name: p.name,
+    notes: p.notes,
+    created_at: iso(p.created_at),
+    captures: cRes.rows.map((c) => ({
+      id: num(c.id),
+      code: c.code,
+      lat: c.lat,
+      lon: c.lon,
+      road_ref: c.road_ref,
+      kortform: c.kortform,
+      road_lat: c.road_lat,
+      road_lon: c.road_lon,
+      notes: c.notes,
+      created_at: iso(c.created_at),
+    })),
+    files: fRes.rows.map((f) => ({
+      id: num(f.id),
+      filename: f.filename,
+      measurement_count: num(f.measurement_count),
+      uploaded_at: iso(f.uploaded_at),
+      updated_at: iso(f.updated_at),
+    })),
+  };
+}
+
+export async function deleteProject(id) {
+  await pool.query(`DELETE FROM projects WHERE id = $1`, [id]);
+}
+
+// Append a capture and mint the next 2-digit code for the project (or
+// 3-digit if a project somehow grows past 99). Uses a transaction so two
+// simultaneous capture requests can't both grab the same code.
+export async function appendCapture(projectId, payload) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const maxRes = await client.query(
+      `SELECT COALESCE(MAX(CAST(code AS INTEGER)), -1) AS m FROM captures WHERE project_id = $1`,
+      [projectId]
+    );
+    const nextN = Number(maxRes.rows[0].m) + 1;
+    const code = nextN < 100 ? String(nextN).padStart(2, '0') : String(nextN);
+    const insRes = await client.query(
+      `INSERT INTO captures
+         (project_id, code, lat, lon, road_ref, kortform, road_lat, road_lon, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING id, code, lat, lon, road_ref, kortform, road_lat, road_lon, notes, created_at`,
+      [
+        projectId, code,
+        payload.lat, payload.lon,
+        payload.road_ref || null, payload.kortform || null,
+        payload.road_lat ?? null, payload.road_lon ?? null,
+        payload.notes || null,
+      ]
+    );
+    await client.query('COMMIT');
+    const r = insRes.rows[0];
+    return {
+      id: num(r.id), code: r.code, lat: r.lat, lon: r.lon,
+      road_ref: r.road_ref, kortform: r.kortform,
+      road_lat: r.road_lat, road_lon: r.road_lon,
+      notes: r.notes, created_at: iso(r.created_at),
+    };
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+export async function deleteCapture(id) {
+  await pool.query(`DELETE FROM captures WHERE id = $1`, [id]);
+}
+
+// Insert a file like insertFile, but tagged to a project. Used by the
+// project-upload endpoint; we keep the two paths separate so the legacy
+// "untagged upload" endpoint stays simple.
+export async function insertFileForProject(doc, filename, projectId) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const fileRes = await client.query(
+      `INSERT INTO files (filename, version, serial, headers_json, project_id)
+       VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+      [filename, doc.version || '', doc.serial || '', JSON.stringify(doc.headers), projectId]
+    );
+    const fileId = num(fileRes.rows[0].id);
+    for (let idx = 0; idx < doc.rows.length; idx++) {
+      const row = doc.rows[idx];
+      await client.query(
+        `INSERT INTO measurements (file_id, position, cells_json, lat, lon)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [fileId, idx, JSON.stringify(row.cells), row.gps ? row.gps.lat : null, row.gps ? row.gps.lon : null]
+      );
+    }
+    await client.query('COMMIT');
+    return fileId;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// Fetch all captures for a project keyed by their code, used by the
+// project-upload merge step on the desktop side.
+export async function getCapturesByCode(projectId) {
+  const res = await pool.query(
+    `SELECT code, lat, lon, road_ref, kortform, road_lat, road_lon
+       FROM captures WHERE project_id = $1`,
+    [projectId]
+  );
+  const map = new Map();
+  for (const r of res.rows) map.set(r.code, r);
+  return map;
 }
 
 // Apply a snapped position: writes new lat/lon AND rewrites the GPS textual

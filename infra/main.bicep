@@ -6,7 +6,16 @@
 //   - Azure Container Registry (ACR)
 //   - Azure Database for PostgreSQL Flexible Server (B1ms)
 //   - Container Apps Environment
-//   - Container App (pqi-viewer)
+//   - Container App (pqi-viewer)         — desktop UI on :8080
+//   - Container App (pqi-viewer-mobile)  — mobile companion on :8081
+//
+// Two Container Apps from the SAME image: Container Apps' HTTP ingress
+// only supports one targetPort per app, so we run the desktop bundle in
+// one app (PORT=8080, MOBILE_PORT=0) and the mobile bundle in another
+// (PORT=0, MOBILE_PORT=8081). Each gets its own
+//   https://<name>.<region>.azurecontainerapps.io
+// URL with a valid Let's Encrypt cert — important on the mobile side,
+// because browser geolocation only works in secure contexts.
 //
 // Why Postgres and not SQLite-on-Azure-Files: Container Apps' Azure Files
 // volumes are SMB-backed, which doesn't implement the POSIX byte-range
@@ -46,13 +55,14 @@ param pgAdminUser string = 'pqiadmin'
 param pgAdminPassword string = '${uniqueString(resourceGroup().id, 'pqi-pg')}Aa1!'
 
 // ── Derived names ────────────────────────────────────────────
-var acrName          = '${appName}acr${uniqueString(resourceGroup().id)}'
-var logName          = '${appName}-logs'
-var envName          = '${appName}-env'
-var pgServerName     = '${appName}-pg'
-var pgDatabaseName   = 'pqi'
-var appContainerName = 'pqi-viewer'
-var imageName        = '${acr.properties.loginServer}/pqi-viewer:${imageTag}'
+var acrName                = '${appName}acr${uniqueString(resourceGroup().id)}'
+var logName                = '${appName}-logs'
+var envName                = '${appName}-env'
+var pgServerName           = '${appName}-pg'
+var pgDatabaseName         = 'pqi'
+var appContainerName       = 'pqi-viewer'
+var mobileContainerName    = 'pqi-viewer-mobile'
+var imageName              = '${acr.properties.loginServer}/pqi-viewer:${imageTag}'
 
 // ── Log Analytics ─────────────────────────────────────────────
 resource logWorkspace 'Microsoft.OperationalInsights/workspaces@2022-10-01' = {
@@ -138,7 +148,10 @@ resource containerEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
   }
 }
 
-// ── Container App ─────────────────────────────────────────────
+// ── Container App: desktop UI (port 8080) ────────────────────
+// Set MOBILE_PORT=0 so this replica only binds the desktop listener.
+// Sharing image + DB with the mobile app means each Container App can
+// scale independently while the operator sees the same data on both.
 resource containerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployContainerApp) {
   name: appContainerName
   location: location
@@ -181,10 +194,9 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployConta
             memory: '1Gi'
           }
           env: [
-            {
-              name: 'DATABASE_URL'
-              secretRef: 'database-url'
-            }
+            { name: 'DATABASE_URL', secretRef: 'database-url' }
+            { name: 'PORT',         value: '8080' }
+            { name: 'MOBILE_PORT',  value: '0' }   // disable the mobile listener here
           ]
         }
       ]
@@ -197,10 +209,72 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployConta
   dependsOn: [pgDatabase]
 }
 
+// ── Container App: mobile companion (port 8081) ───────────────
+// Same image; PORT=0 so this replica skips the desktop listener and
+// only binds 8081 for the mobile bundle. Its own HTTP ingress means
+// Azure gives it a separate https://<name>.<region>... URL with a
+// valid Let's Encrypt cert — required for the browser Geolocation API
+// to work on the operator's phone.
+resource mobileContainerApp 'Microsoft.App/containerApps@2024-03-01' = if (deployContainerApp) {
+  name: mobileContainerName
+  location: location
+  properties: {
+    environmentId: containerEnv.id
+    configuration: {
+      ingress: {
+        external: true
+        targetPort: 8081
+        transport: 'auto'
+      }
+      registries: [
+        {
+          server: acr.properties.loginServer
+          username: acr.listCredentials().username
+          passwordSecretRef: 'acr-password'
+        }
+      ]
+      secrets: [
+        {
+          name: 'acr-password'
+          value: acr.listCredentials().passwords[0].value
+        }
+        {
+          name: 'database-url'
+          value: 'postgres://${pgAdminUser}:${pgAdminPassword}@${pgServer.properties.fullyQualifiedDomainName}:5432/${pgDatabaseName}?sslmode=require'
+        }
+      ]
+    }
+    template: {
+      containers: [
+        {
+          name: mobileContainerName
+          image: imageName
+          resources: {
+            cpu: json('0.25')   // mobile UI is lighter — quarter vCPU is plenty
+            memory: '0.5Gi'
+          }
+          env: [
+            { name: 'DATABASE_URL', secretRef: 'database-url' }
+            { name: 'PORT',         value: '0' }    // disable desktop listener here
+            { name: 'MOBILE_PORT',  value: '8081' }
+          ]
+        }
+      ]
+      scale: {
+        minReplicas: 0
+        maxReplicas: 2
+      }
+    }
+  }
+  dependsOn: [pgDatabase]
+}
+
 // ── Outputs ───────────────────────────────────────────────────
 output acrName string = acr.name
 output acrLoginServer string = acr.properties.loginServer
 output pgServerName string = pgServer.name
 output pgFqdn string = pgServer.properties.fullyQualifiedDomainName
-var fqdn = containerApp.?properties.configuration.ingress.fqdn ?? ''
-output appUrl string = empty(fqdn) ? '' : 'https://${fqdn}'
+var fqdn       = containerApp.?properties.configuration.ingress.fqdn ?? ''
+var mobileFqdn = mobileContainerApp.?properties.configuration.ingress.fqdn ?? ''
+output appUrl       string = empty(fqdn)       ? '' : 'https://${fqdn}'
+output mobileAppUrl string = empty(mobileFqdn) ? '' : 'https://${mobileFqdn}'

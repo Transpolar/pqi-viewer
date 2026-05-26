@@ -1,4 +1,4 @@
-# --- Stage 1: build the React frontend ----------------------------------
+# --- Stage 1: build the desktop React frontend --------------------------
 FROM node:20-alpine AS client-build
 WORKDIR /app/client
 
@@ -15,14 +15,25 @@ RUN rm -rf node_modules && npm install --no-audit --no-fund
 # Call vite via `node` directly so we don't depend on the .bin/vite exec bit.
 RUN node ./node_modules/vite/bin/vite.js build
 
-# --- Stage 2: server runtime --------------------------------------------
+# --- Stage 2: build the mobile companion React frontend -----------------
+FROM node:20-alpine AS mobile-build
+WORKDIR /app/mobile/client
+
+COPY mobile/client/package.json mobile/client/package-lock.json* ./
+RUN rm -rf node_modules && npm install --no-audit --no-fund
+
+COPY mobile/client/ ./
+RUN rm -rf node_modules && npm install --no-audit --no-fund
+
+RUN node ./node_modules/vite/bin/vite.js build
+
+# --- Stage 3: server runtime --------------------------------------------
 FROM node:20-alpine AS runtime
 
-RUN mkdir -p /app/server /app/client/dist
+RUN mkdir -p /app/server /app/client/dist /app/mobile/client/dist
 
 WORKDIR /app/server
-# `pg` is pure JS — no C toolchain needed at install time (unlike the
-# SQLite branch, which needed python3/make/g++ for better-sqlite3).
+# `pg` is pure JS — no C toolchain needed at install time.
 COPY server/package.json server/package-lock.json* ./
 RUN rm -rf node_modules && npm install --omit=dev --no-audit --no-fund
 
@@ -30,12 +41,16 @@ COPY server/ ./
 RUN rm -rf node_modules && npm install --omit=dev --no-audit --no-fund
 
 COPY --from=client-build /app/client/dist /app/client/dist
+COPY --from=mobile-build /app/mobile/client/dist /app/mobile/client/dist
 
 ENV NODE_ENV=production \
-    PORT=8080
+    PORT=8080 \
+    MOBILE_PORT=8081
 # DATABASE_URL must be provided at runtime (env var, set by deploy.sh /
 # docker-compose / Container App secret).
 
-EXPOSE 8080
+# 8080 = desktop UI + REST API
+# 8081 = mobile companion UI (same REST API surface for the endpoints it uses)
+EXPOSE 8080 8081
 
 CMD ["node", "index.js"]

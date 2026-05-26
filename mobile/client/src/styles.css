@@ -1,0 +1,237 @@
+:root {
+  --bg: #f4f5f8;
+  --panel: #ffffff;
+  --border: #d8dbe2;
+  --text: #1f2330;
+  --muted: #6b7280;
+  --accent: #2d6cdf;
+  --accent-hover: #1f54b6;
+  --good: #2f9e44;
+  --bad: #c92a2a;
+  --warn: #e0731a;
+  --tap: 56px;          /* minimum tappable target on a phone */
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+html, body, #root {
+  margin: 0;
+  height: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 17px;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: 10px;
+  padding: 1rem 1.4rem;
+  min-height: var(--tap);
+  font-weight: 600;
+}
+button:disabled { background: #b9bcc4; cursor: wait; }
+button.ghost {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+button.danger { background: var(--bad); }
+button.huge {
+  font-size: 1.2rem;
+  padding: 1.2rem 1.6rem;
+  width: 100%;
+}
+
+input, select, textarea {
+  font: inherit;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.85rem 0.9rem;
+  background: var(--panel);
+  color: var(--text);
+}
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.7rem 1rem;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  padding-top: max(0.7rem, env(safe-area-inset-top));
+}
+.topbar h1 {
+  font-size: 1rem;
+  margin: 0;
+  letter-spacing: 0.02em;
+}
+.topbar .crumb { color: var(--muted); font-size: 0.85rem; }
+.topbar button {
+  padding: 0.35rem 0.7rem;
+  min-height: auto;
+  font-size: 0.85rem;
+}
+
+.page {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1rem;
+  padding-bottom: max(1rem, env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+.page.no-pad { padding: 0; }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1rem;
+}
+
+.muted { color: var(--muted); }
+.error { color: var(--bad); }
+.good  { color: var(--good); }
+
+/* --- Project picker ---------------------------------------------------- */
+
+.project-list { display: flex; flex-direction: column; gap: 0.5rem; }
+.project-list button.project {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  text-align: left;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 0.85rem 1rem;
+  gap: 0.2rem;
+}
+.project-list button.project .name { font-weight: 600; }
+.project-list button.project .meta { color: var(--muted); font-size: 0.85rem; }
+
+.new-project { display: flex; flex-direction: column; gap: 0.5rem; }
+
+/* --- Capture screen ---------------------------------------------------- */
+
+.capture-screen {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.capture-map {
+  position: relative;
+  flex: 1;
+  min-height: 240px;
+}
+.capture-map .leaflet-container { height: 100%; width: 100%; }
+.capture-info {
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  padding: 0.85rem 1rem;
+  padding-bottom: max(0.85rem, env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.capture-info .coords {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.capture-info .road {
+  font-size: 0.95rem;
+}
+.capture-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+.capture-actions button { flex: 1; }
+
+.gps-banner {
+  background: #fff8d6;
+  color: #735200;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.85rem;
+  border-bottom: 1px solid var(--border);
+}
+.gps-banner.error { background: #fde2e2; color: var(--bad); }
+
+/* --- Code modal -------------------------------------------------------- */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(31, 35, 48, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  z-index: 2000;
+}
+.modal {
+  background: var(--panel);
+  border-radius: 16px;
+  padding: 1.4rem;
+  width: 100%;
+  max-width: 420px;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  text-align: center;
+}
+.modal .label {
+  color: var(--muted);
+  font-size: 0.9rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.modal .code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 5rem;
+  font-weight: 700;
+  letter-spacing: 0.2rem;
+  line-height: 1.1;
+}
+.modal .road { font-size: 1rem; }
+
+/* --- Captures list (under map) ---------------------------------------- */
+
+.captures-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  max-height: 160px;
+  overflow-y: auto;
+  font-size: 0.85rem;
+}
+.captures-list .cap {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.35rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+.captures-list .cap .c-code { font-weight: 700; font-family: ui-monospace, monospace; }
+.captures-list .cap .c-road { color: var(--muted); flex: 1; text-align: right; }

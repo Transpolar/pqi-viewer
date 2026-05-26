@@ -5,6 +5,55 @@ All notable changes to PQI Viewer are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] — 2026-05-26
+
+### Added
+
+- **Mobile companion app.** New mobile-friendly web app served from the
+  same container on port **8081**. Field flow:
+  1. Phone opens `http://pqi-host:8081`, picks (or creates) a project.
+  2. Browser geolocation centres a Kartverket topo map on the operator's
+     position; the marker is **draggable** so the operator can nudge it
+     onto the actual measurement spot before saving.
+  3. Tap "Save capture" → server reverse-looks-up the lat/lon against
+     NVDB and mints the next per-project 2-digit code (`00`, `01`, …).
+  4. Code appears in a big modal — operator types it into the PQI
+     device's **Beskrivelse1** cell, then takes the measurement.
+- **Per-project upload + merge.** New `POST /api/projects/:id/files`
+  endpoint and matching "Projects" page on the desktop. Upload a
+  `.pqidat` into a project and the server joins every row to its capture
+  by the 2-digit Beskrivelse1 code, pre-filling `Sted på veien`,
+  `Beskrivelse2` and `GPS` from the capture's resolved NVDB position.
+  Rows whose code doesn't match a capture are imported unchanged.
+- **Shared `projects` and `captures` tables** in Postgres. `files` gains
+  a nullable `project_id` so files can be tagged to a project without
+  breaking legacy uploads.
+- **Projects nav + page** in the desktop UI (`#/projects`,
+  `#/projects/:id`) — list, create, delete projects; see captures and
+  uploaded files per project.
+
+### Changed
+
+- **Single container, two ports.** One Node process now spawns two
+  Express apps in the same image: 8080 serves the desktop bundle, 8081
+  serves the mobile bundle. Both share the DB pool, the NVDB client and
+  the project + capture REST handlers (factored into a
+  `registerSharedApi(targetApp)` helper). `docker-compose.yml` exposes
+  both ports from the existing `pqi-app` service.
+- **Dockerfile** now multi-stage builds `client/` and `mobile/client/`
+  in parallel stages, then copies both `dist/` folders into the runtime.
+- **Azure infra (`infra/main.bicep` + `infra/deploy.sh`).** Adds a
+  second Container App (`pqi-viewer-mobile`) that pulls the same image
+  with `PORT=0, MOBILE_PORT=8081` so the mobile bundle gets its own
+  `https://pqi-viewer-mobile.<region>.azurecontainerapps.io` URL with a
+  valid Let's Encrypt cert — required for the browser Geolocation API.
+  Both Container Apps share the same Postgres and can scale to zero
+  independently. `deploy.sh` now prints both URLs and cleans up both
+  apps on rerun.
+- **Server boot.** `PORT` and `MOBILE_PORT` can now be set to `0` to
+  disable a listener, so the desktop and mobile Container Apps each
+  bind only the port their HTTP ingress targets.
+
 ## [0.13.2] — 2026-05-25
 
 ### Changed

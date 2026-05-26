@@ -17,6 +17,14 @@ import {
   getHeadersForMeasurement,
   getMeasurementWithFile,
   applySnap,
+  listProjects,
+  createProject,
+  getProject,
+  deleteProject,
+  insertFileForProject,
+  getCapturesByCode,
+  appendCapture,
+  deleteCapture,
 } from './db.js';
 import {
   assembleRoadRef,
@@ -33,7 +41,7 @@ const __dirname = path.dirname(__filename);
 
 // Bump this when you change anything user-visible. Surfaced via /api/version
 // and shown in the UI footer so the user can confirm which build is live.
-const APP_VERSION = '0.13.2';
+const APP_VERSION = '0.14.0';
 const APP_BUILT  = new Date().toISOString();
 
 const app = express();
@@ -125,14 +133,97 @@ function refMissingReason(headers, cells) {
 
 // --- API ----------------------------------------------------------------
 
-app.get('/api/health', (_req, res) => res.json({ ok: true }));
+// Endpoints shared by BOTH the desktop and mobile apps. We register them
+// on each Express instance via this function rather than mounting one app
+// on the other, because mounting confuses the static-file middleware
+// (desktop's `client/dist` would shadow mobile's `mobile/client/dist`).
+// Keeping a single closure per handler means no logic duplication.
+function registerSharedApi(targetApp) {
+  targetApp.get('/api/health', (_req, res) => res.json({ ok: true }));
 
-app.get('/api/version', (_req, res) => res.json({
-  version: APP_VERSION,
-  built: APP_BUILT,
-  node: process.version,
-  pid: process.pid,
-}));
+  targetApp.get('/api/version', (_req, res) => res.json({
+    version: APP_VERSION,
+    built: APP_BUILT,
+    node: process.version,
+    pid: process.pid,
+  }));
+
+  targetApp.get('/api/projects', async (_req, res, next) => {
+    try { res.json(await listProjects()); } catch (err) { next(err); }
+  });
+
+  targetApp.post('/api/projects', async (req, res, next) => {
+    try {
+      const name = String(req.body?.name || '').trim();
+      if (!name) return res.status(400).json({ error: 'name required' });
+      res.json(await createProject(name, req.body?.notes));
+    } catch (err) {
+      if (err && /unique/i.test(String(err.message))) {
+        return res.status(409).json({ error: 'project name already exists' });
+      }
+      next(err);
+    }
+  });
+
+  targetApp.get('/api/projects/:id', async (req, res, next) => {
+    try {
+      const id = Number(req.params.id);
+      const p = await getProject(id);
+      if (!p) return res.status(404).json({ error: 'not found' });
+      res.json(p);
+    } catch (err) { next(err); }
+  });
+
+  targetApp.delete('/api/projects/:id', async (req, res, next) => {
+    try {
+      const id = Number(req.params.id);
+      await deleteProject(id);
+      res.json({ ok: true });
+    } catch (err) { next(err); }
+  });
+
+  // POST /api/projects/:id/captures
+  // Called by the mobile companion when the operator taps "Save capture".
+  // Reverse-lookup against NVDB → mint per-project 2-digit code → return
+  // both so the operator can type the code into the device's Beskrivelse1.
+  targetApp.post('/api/projects/:id/captures', async (req, res, next) => {
+    try {
+      const projectId = Number(req.params.id);
+      const project = await getProject(projectId);
+      if (!project) return res.status(404).json({ error: 'project not found' });
+
+      const lat = Number(req.body?.lat);
+      const lon = Number(req.body?.lon);
+      if (!isFinite(lat) || !isFinite(lon)) {
+        return res.status(400).json({ error: 'lat and lon (numbers) required' });
+      }
+      const maxDist = req.body?.maxDistance ? Number(req.body.maxDistance) : 200;
+
+      // Tolerate "no road within search radius" — the capture is still
+      // stored so the operator can fix it on the desktop side later.
+      const road = await lookupPosition(lat, lon, maxDist);
+      const cap = await appendCapture(projectId, {
+        lat, lon,
+        road_ref:  road.error ? null : road.ref,
+        kortform:  road.error ? null : road.kortform,
+        road_lat:  road.error ? null : road.lat,
+        road_lon:  road.error ? null : road.lon,
+        notes:     req.body?.notes || null,
+      });
+      console.log(`[capture] project=${projectId} code=${cap.code} ref=${cap.kortform || '—'}`);
+      res.json({ ...cap, nvdb: road.error ? { error: road.error } : road });
+    } catch (err) { next(err); }
+  });
+
+  targetApp.delete('/api/captures/:id', async (req, res, next) => {
+    try {
+      await deleteCapture(Number(req.params.id));
+      res.json({ ok: true });
+    } catch (err) { next(err); }
+  });
+}
+
+registerSharedApi(app);
 
 app.get('/api/files', async (_req, res, next) => {
   try {
@@ -172,6 +263,89 @@ app.post('/api/files', upload.single('file'), async (req, res, next) => {
     const doc = parsePqi(text);
     const id = await insertFile(doc, filename);
     res.json({ id, filename, measurements: doc.rows.length });
+  } catch (err) {
+    if (err && err.message && err.message.startsWith('PQI')) {
+      return res.status(400).json({ error: 'parse failed', detail: String(err.message) });
+    }
+    next(err);
+  }
+});
+
+// Projects + captures REST endpoints are defined in registerSharedApi()
+// above (they're also exposed on the mobile-companion port). The desktop
+// side adds the one upload endpoint below — multer + the merge step
+// aren't needed on mobile.
+
+// POST /api/projects/:id/files
+// Upload a .pqidat into a project. Before storing, the parser walks every
+// row and, for any row whose Beskrivelse1 cell matches a 2-digit capture
+// code from this project, rewrites the row's Sted på veien, Beskrivelse2
+// and GPS cells from the capture's resolved NVDB position. The result is
+// a file where the device just typed "01", "02", "03" but the saved data
+// already has the full road context — and the GPS already snapped.
+app.post('/api/projects/:id/files', upload.single('file'), async (req, res, next) => {
+  if (!req.file) return res.status(400).json({ error: 'file required' });
+  try {
+    const projectId = Number(req.params.id);
+    const project = await getProject(projectId);
+    if (!project) return res.status(404).json({ error: 'project not found' });
+
+    const text = req.file.buffer.toString('utf8');
+    const doc = parsePqi(text);
+
+    const capturesByCode = await getCapturesByCode(projectId);
+
+    const b1Idx    = findColumn(doc.headers, 'Beskrivelse1');
+    const stedIdx  = findColumn(doc.headers, 'Sted på veien');
+    const b2Idx    = findColumn(doc.headers, 'Beskrivelse2');
+    const gpsIdx   = findColumn(doc.headers, 'GPS');
+
+    let matched = 0;
+    const matchDetails = [];
+    for (const row of doc.rows) {
+      const raw = b1Idx >= 0 ? String(row.cells[b1Idx] || '').trim() : '';
+      // Accept "1", "01", "  17  " — normalise to the zero-padded 2-digit
+      // form we minted. Skip empty / non-numeric cells silently.
+      if (!/^\d+$/.test(raw)) continue;
+      const code = raw.length === 1 ? '0' + raw : raw;
+      const cap = capturesByCode.get(code);
+      if (!cap) continue;
+
+      // Apply: road context from the capture's resolved NVDB ref + GPS
+      // from the road-marker position (so the row is also pre-snapped).
+      if (cap.kortform && stedIdx >= 0) {
+        // kortform is the canonical "FV911 S1D1 m100" style — split off the
+        // meter and write the road+section into Sted på veien and the meter
+        // into Beskrivelse2 so the desktop's road-ref parser keeps working.
+        const m = String(cap.kortform).trim().match(/^(.*?)\s+m(\d+)\s*$/i);
+        if (m) {
+          row.cells[stedIdx] = m[1].replace(/\s+/g, '');
+          if (b2Idx >= 0) row.cells[b2Idx] = `M${m[2]}`;
+        } else {
+          row.cells[stedIdx] = String(cap.kortform);
+        }
+      } else if (cap.road_ref && stedIdx >= 0) {
+        row.cells[stedIdx] = String(cap.road_ref);
+      }
+
+      if (gpsIdx >= 0) {
+        const useLat = cap.road_lat != null ? cap.road_lat : cap.lat;
+        const useLon = cap.road_lon != null ? cap.road_lon : cap.lon;
+        row.cells[gpsIdx] = formatGps(useLat, useLon);
+        row.gps = { lat: useLat, lon: useLon };
+      }
+      matched++;
+      matchDetails.push({ code, kortform: cap.kortform });
+    }
+
+    const filename = req.file.originalname || 'upload.pqidat';
+    const id = await insertFileForProject(doc, filename, projectId);
+    res.json({
+      id, filename, projectId,
+      measurements: doc.rows.length,
+      matched,
+      matchDetails,
+    });
   } catch (err) {
     if (err && err.message && err.message.startsWith('PQI')) {
       return res.status(400).json({ error: 'parse failed', detail: String(err.message) });
@@ -432,16 +606,72 @@ if (fs.existsSync(clientDist)) {
   });
 }
 
-const PORT = Number(process.env.PORT) || 8080;
+// --- Mobile companion (second port) -------------------------------------
+//
+// Second Express instance in the same Node process. Same DB pool, same
+// NVDB client, same shared API handlers (registered via
+// registerSharedApi). Only difference is the static bundle — mobile/client
+// instead of client. The operator hits :8080 on a laptop and :8081 on a
+// phone; each side gets a UI tuned to its form factor.
+const mobileApp = express();
+mobileApp.use(express.json({ limit: '1mb' }));
+mobileApp.use((req, res, next) => {
+  if (!req.url.startsWith('/api')) return next();
+  const started = Date.now();
+  res.on('finish', () => {
+    const ms = Date.now() - started;
+    console.log(`[req:mobile] ${req.method} ${req.url} → ${res.statusCode} ${ms}ms`);
+  });
+  next();
+});
+registerSharedApi(mobileApp);
+
+// Re-use the same error handler on the mobile app so thrown handler
+// errors don't dangle the client.
+mobileApp.use((err, _req, res, _next) => {
+  console.error('[err:mobile]', err);
+  res.status(500).json({ error: 'internal error', detail: String(err?.message || err) });
+});
+
+const mobileDist = path.resolve(__dirname, '..', 'mobile', 'client', 'dist');
+if (fs.existsSync(mobileDist)) {
+  mobileApp.use(express.static(mobileDist));
+  mobileApp.get(/^(?!\/api).*/, (_req, res) => {
+    res.sendFile(path.join(mobileDist, 'index.html'));
+  });
+}
+
+// Ports can be set to 0 to disable that listener. This is used in Azure
+// where each Container App gets HTTP ingress on a single targetPort —
+// the "desktop" Container App runs with MOBILE_PORT=0 and the "mobile"
+// Container App runs with PORT=0. docker-compose leaves both at their
+// defaults so the single local container serves both surfaces.
+const PORT        = process.env.PORT        != null ? Number(process.env.PORT)        : 8080;
+const MOBILE_PORT = process.env.MOBILE_PORT != null ? Number(process.env.MOBILE_PORT) : 8081;
 
 // Init schema first so the first /api/files request doesn't race table
 // creation. If Postgres is unreachable at boot we want to crash loudly
 // rather than silently serve 500s — Container Apps will restart us.
 initSchema()
   .then(() => {
-    app.listen(PORT, () => {
-      console.log(`PQI app listening on http://0.0.0.0:${PORT}`);
-    });
+    if (PORT > 0) {
+      app.listen(PORT, () => {
+        console.log(`PQI app listening on http://0.0.0.0:${PORT}`);
+      });
+    } else {
+      console.log('PQI app listener disabled (PORT=0)');
+    }
+    if (MOBILE_PORT > 0) {
+      mobileApp.listen(MOBILE_PORT, () => {
+        console.log(`PQI mobile companion listening on http://0.0.0.0:${MOBILE_PORT}`);
+      });
+    } else {
+      console.log('PQI mobile companion listener disabled (MOBILE_PORT=0)');
+    }
+    if (PORT <= 0 && MOBILE_PORT <= 0) {
+      console.error('[fatal] both PORT and MOBILE_PORT are disabled — nothing to serve');
+      process.exit(1);
+    }
   })
   .catch((err) => {
     console.error('[fatal] schema init failed:', err);

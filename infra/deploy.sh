@@ -50,14 +50,16 @@ az acr build \
   --file Dockerfile \
   "${GITHUB_REPO}#${GITHUB_BRANCH}"
 
-echo "▶ Step 5: Remove any prior failed Container App (idempotent)"
-az containerapp delete \
-  --name pqi-viewer \
-  --resource-group "$RESOURCE_GROUP" \
-  --yes \
-  --output none 2>/dev/null || true
+echo "▶ Step 5: Remove any prior failed Container Apps (idempotent)"
+for ca in pqi-viewer pqi-viewer-mobile; do
+  az containerapp delete \
+    --name "$ca" \
+    --resource-group "$RESOURCE_GROUP" \
+    --yes \
+    --output none 2>/dev/null || true
+done
 
-echo "▶ Step 6: Deploy Container App (image now exists in ACR)"
+echo "▶ Step 6: Deploy Container Apps (image now exists in ACR)"
 APP_OUTPUT=$(az deployment group create \
   --resource-group "$RESOURCE_GROUP" \
   --name pqi-app \
@@ -66,22 +68,29 @@ APP_OUTPUT=$(az deployment group create \
   --output json)
 
 APP_URL=$(echo "$APP_OUTPUT" | python3 -c "import sys,json; print(json.load(sys.stdin)['properties']['outputs']['appUrl']['value'])")
+MOBILE_URL=$(echo "$APP_OUTPUT" | python3 -c "import sys,json; print(json.load(sys.stdin)['properties']['outputs']['mobileAppUrl']['value'])")
 
 echo ""
 echo "✅ Deployment complete!"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "   🌍 App URL:  $APP_URL"
+echo "   🖥  Desktop:  $APP_URL"
+echo "   📱 Mobile:   $MOBILE_URL"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
+echo "   Open the mobile URL on your phone — HTTPS means browser"
+echo "   geolocation works without extra setup."
 echo "   Note: First visit may be slow (cold start)."
 echo ""
 echo "   Useful commands:"
-echo "   # Stream live logs"
+echo "   # Stream live logs (desktop)"
 echo "   az containerapp logs show -n pqi-viewer -g $RESOURCE_GROUP --follow"
+echo "   # Stream live logs (mobile)"
+echo "   az containerapp logs show -n pqi-viewer-mobile -g $RESOURCE_GROUP --follow"
 echo ""
 echo "   # Redeploy after a code update on the ${GITHUB_BRANCH} branch"
 echo "   az acr build --registry $ACR_NAME --image pqi-viewer:latest --file Dockerfile ${GITHUB_REPO}#${GITHUB_BRANCH}"
-echo "   az containerapp update -n pqi-viewer -g $RESOURCE_GROUP --image ${ACR_SERVER}/pqi-viewer:latest"
+echo "   az containerapp update -n pqi-viewer        -g $RESOURCE_GROUP --image ${ACR_SERVER}/pqi-viewer:latest"
+echo "   az containerapp update -n pqi-viewer-mobile -g $RESOURCE_GROUP --image ${ACR_SERVER}/pqi-viewer:latest"
 echo ""
 echo "   # Connect to the DB (psql in Cloud Shell)"
 echo "   az postgres flexible-server connect -n ${APP_NAME}-pg -u pqiadmin -d pqi"

@@ -56,4 +56,22 @@ export const api = {
         if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
         return res.json();
       }),
+  // Project + capture endpoints (shared with the mobile companion).
+  listProjects: () => fetch('/api/projects').then(jsonOrThrow),
+  getProject: (id) => fetch(`/api/projects/${id}`).then(jsonOrThrow),
+  createProject: (name, notes) =>
+    fetch('/api/projects', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, notes }),
+    }).then(jsonOrThrow),
+  deleteProject: (id) =>
+    fetch(`/api/projects/${id}`, { method: 'DELETE' }).then(jsonOrThrow),
+  // Upload a .pqidat into a project — server joins rows to captures by
+  // Beskrivelse1 code and pre-fills road context + GPS on matched rows.
+  uploadFileToProject: (projectId, file) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    return fetch(`/api/projects/${projectId}/files`, { method: 'POST', body: fd }).then(jsonOrThrow);
+  },
 };
