@@ -38,4 +38,35 @@ export const api = {
         if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
         return res.json();
       }),
+  // NVDB Dekkebredde / Vegbredde lookup for a vegsystemreferanse.
+  // Returns { width_m, samples, source } on success, { width_m: null }
+  // if NVDB has no width mapped here, throws on error.
+  roadWidthForRef: (ref) =>
+    fetch(`/api/road-width?vegsystemreferanse=${encodeURIComponent(ref)}`)
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+        return res.json();
+      }),
+  // Road-following distance between two GPS positions. Uses NVDB meter
+  // delta when both endpoints land on the same delstrekning; falls
+  // back to null for road_m otherwise (client uses straight-line as
+  // the estimate).
+  roadDistance: (startLat, startLon, endLat, endLon) =>
+    fetch('/api/road-distance', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ startLat, startLon, endLat, endLon }),
+    }).then(async (res) => {
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      return res.json();
+    }),
+  saveMeasurement: (projectId, { type, name, data }) =>
+    fetch(`/api/projects/${projectId}/measurements`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type, name, data }),
+    }).then(async (res) => {
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      return res.json();
+    }),
 };

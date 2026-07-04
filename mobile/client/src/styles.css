@@ -112,6 +112,39 @@ input:focus, select:focus, textarea:focus {
 .error { color: var(--bad); }
 .good  { color: var(--good); }
 
+/* --- Home tiles -------------------------------------------------------- */
+
+.home-tiles {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+.tile {
+  display: block;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1rem 1.1rem;
+  color: var(--text);
+  text-decoration: none;
+}
+.tile:active { background: #eef4ff; }
+.tile-icon {
+  font-size: 1.6rem;
+  line-height: 1;
+  margin-bottom: 0.3rem;
+}
+.tile-title {
+  font-size: 1.05rem;
+  font-weight: 700;
+  margin-bottom: 0.15rem;
+}
+.tile-sub {
+  font-size: 0.85rem;
+  color: var(--muted);
+  line-height: 1.35;
+}
+
 /* --- Project picker ---------------------------------------------------- */
 
 .project-list { display: flex; flex-direction: column; gap: 0.5rem; }

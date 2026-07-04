@@ -5,6 +5,165 @@ All notable changes to PQI Viewer are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0] — 2026-05-26
+
+### Added
+
+- **AreaWalker: stop-and-go corner mode with vertex averaging.**
+  Primary flow is now: stand at each corner → tap **📍 Save corner**
+  → phone collects up to 12 qualified GPS fixes over up to 15 s →
+  stores the **median** as one point. Quality gates on every incoming
+  fix: `accuracy > 0`, `accuracy ≤ 10 m`, `timestamp < 5 s old`. On
+  finish the result panel also reports the average corner spread
+  (tightness of each sample cluster) so the operator has a sense of
+  how much to trust the m² number. A checkbox toggles the old
+  walk-and-log mode as an opt-in for very large loose shapes; the
+  default is corner-median because it's dramatically more accurate.
+- **Estimate now uses road-follow distance from NVDB.** New
+  `POST /api/road-distance` (server) computes distance by reverse-
+  looking-up both endpoints and, when both land on the same
+  `(kategori, nummer, strekning, delstrekning)`, returning the meter
+  delta from NVDB's `vegsystemreferanse`. Client shows the road
+  length in green, with the straight-line length as a secondary
+  reference. Multi-segment routing isn't implemented yet — the
+  endpoint returns `road_m: null` with a reason and the client falls
+  back to straight-line distance in the tonnage math.
+- **Save measurements to a project.** New
+  `project_measurements (id, project_id, type, name, data JSON,
+  created_at)` table. Endpoints:
+  `POST /api/projects/:id/measurements` (save),
+  `DELETE /api/measurements/saved/:id` (remove). Both the estimate
+  and area screens get a **💾 Save to project** button that opens a
+  modal picker for an existing project (or spins up a new one
+  in-line). Desktop **Projects → detail** page now shows a "Saved
+  measurements" section listing all estimates and walked areas per
+  project, with type-appropriate summary columns.
+- **lookupPosition returns structured road address.** In addition to
+  the `kortform`, the position response now includes `vegkategori`,
+  `vegnummer`, `strekning`, `delstrekning`, `meter`. Used by
+  `/api/road-distance` and available to future clients.
+
+### Notes on GPS accuracy
+
+- The browser Geolocation API doesn't expose iOS Core Location knobs
+  like `desiredAccuracy = kCLLocationAccuracyBestForNavigation` or
+  `requestTemporaryFullAccuracyAuthorization` from a web app — that
+  requires a native shell. `enableHighAccuracy: true` is the best a
+  PWA can request. Typical iOS Safari accuracy on a modern iPhone is
+  5–15 m; corner-median gets that down to ~2–5 m per corner on a
+  quiet fix. For survey-grade work you'd want an external RTK GNSS
+  receiver (Emlid Reach, Bad Elf) feeding a native app — outside the
+  scope of this web app for now.
+
+## [0.17.2] — 2026-05-26
+
+### Fixed
+
+- **NVDB width auto-fill in the asphalt estimator now actually works.**
+  The 0.17.0 implementation used guessed vegobjekttype IDs that didn't
+  match reality. Verified against the NVDB datakatalog and rewrote
+  `lookupWidth(ref)` in `server/nvdb.js`:
+  - **VT 838** ("Vegbredde, beregnet" — modern, NVDB-computed) tried
+    first. The catalogue explicitly tells callers to prefer 838 over
+    the historisk variant.
+  - **VT 583** ("Vegbredde, historisk") used as fallback only when 838
+    has no data for the segment.
+  - Property names matched **exactly** in priority order: `Dekkebredde`
+    (the wearing course — what an asphalt job pays for) →
+    `Vegbredde` / `Vegbredde, totalt` → `Kjørebanebredde`. The previous
+    substring regex picked up `Dekkebredde, min` etc. by accident.
+  - Switched the include set to `inkluder=alle` to be robust against
+    NVDB tweaking the default field selection.
+  - Server-side `[nvdb-width]` log line on every lookup so it's easy to
+    see in container logs whether NVDB returned width or not.
+- **Mobile width-field status** now distinguishes "checking NVDB…",
+  "auto from NVDB (Dekkebredde, avg of 4)", "NVDB has no width data
+  here — using default", and "edited". The 0.17.0 version silently fell
+  back to 6.5 when NVDB returned nothing, with no visible signal that
+  the lookup had even run.
+
+## [0.17.1] — 2026-05-26
+
+### Changed
+
+- **AreaWalker UX simplified to a three-phase flow.** Idle → tap
+  **▶ Start walking** → walking around the perimeter while the polygon
+  fills in → tap **■ Stop & calculate** → result panel shows the area
+  + perimeter + corner count, with a **↻ Start over** button to reset.
+  Removed the Pause/Resume controls (which were never the right model
+  for "walk around the patch once and stop"). The secondary
+  Drop-corner / Undo buttons stay but only appear while recording.
+  Live area + walked distance still update during recording so the
+  operator can sanity-check the trace.
+
+## [0.17.0] — 2026-05-26
+
+### Added
+
+- **NVDB road-width auto-fill in the asphalt estimator.** New
+  `lookupWidth(ref)` in `server/nvdb.js` hits NVDB's vegobjekter API,
+  trying "Bredde, dekke" (vegobjekttype 583 — wearing-course width)
+  first and falling back to "Bredde" (581 — full road) when dekke
+  isn't mapped on that segment. When the estimator's start and end
+  pins both resolve to a road, the width field is pre-filled with the
+  average of the returned widths, labelled "auto from NVDB
+  (Bredde, dekke, avg of N)". The operator can still edit it — once
+  they do, the field is marked "edited" and auto-fill stops fighting
+  them. Exposed at `GET /api/road-width?vegsystemreferanse=<ref>` on
+  both desktop and mobile ports.
+- **Live GPS + map auto-recenter on the estimate screen.** Continuous
+  `watchPosition` watcher drops a blue dot + accuracy ring on the
+  Kartverket topo (same custom-pane trick as the capture screen). On
+  first fix the map snaps from a Norway-overview view to the
+  operator's actual location at zoom 16.
+- **"Start here" / "End here" buttons.** Drop the segment pins at the
+  operator's current GPS position — perfect for driving down the
+  road you're about to pave: pull over at the start, tap Start here,
+  drive to the end, tap End here. Map taps still work as a manual
+  override.
+
+### Notes
+
+- The vegobjekttype IDs (583, 581) are the most common width
+  attributes in NVDB; if your specific road segment uses a different
+  attribute, the lookup returns `{ width_m: null }` and the field
+  keeps its default — no user-visible error.
+
+## [0.16.0] — 2026-05-26
+
+### Added
+
+- **Mobile home menu** with three tools: **Capture** (existing
+  project + 2-digit code flow), **Asphalt estimate**, **Walk an area**.
+  The home screen is now `#/` on the mobile app; the project picker
+  moved to `#/projects`.
+- **Asphalt estimate (v1).** Tap two points on a Kartverket topo map →
+  app reads NVDB road context for each point (informational) and
+  computes the straight-line segment length. Operator enters width
+  (m), thickness (mm), mix (dropdown with built-in densities for Ab /
+  Agb / Ska / Ma / Pmb, plus a custom-density slot), and wastage (%).
+  Output: estimated tonnes + m³, with the chosen density and wastage
+  shown for transparency. Both pins are draggable for fine-tuning.
+- **Walk an area.** Continuous GPS watcher records a polyline as the
+  operator walks the perimeter of an irregular shape; the polygon
+  auto-closes and the area is reported in m² (with ha for big shapes)
+  using a local-equirectangular shoelace projection (sub-percent error
+  at job-site scale). Quality gates skip fixes worse than ±30 m or
+  closer than 2 m to the previous point. Controls: Start / Pause /
+  Resume / Reset / Undo / ＋ Drop point (manual corner). Perimeter and
+  closing-leg distance are shown live alongside the area.
+
+### Changed
+
+- Mobile router gains `#/estimate` and `#/area`; existing routes
+  unchanged. The topbar's back-arrow always returns to home.
+
+### Notes
+
+- Estimate v1 uses straight-line distance and a single average width;
+  a v2 could pull width along the segment from NVDB's Dekkebredde
+  vegobjekt and sample the road-network distance instead.
+
 ## [0.15.0] — 2026-05-26
 
 ### Added

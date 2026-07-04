@@ -100,6 +100,22 @@ export async function initSchema() {
        ADD COLUMN IF NOT EXISTS project_id BIGINT REFERENCES projects(id) ON DELETE SET NULL
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_files_project ON files(project_id)`);
+
+  // Saved measurements — asphalt estimates and walked areas — that the
+  // operator wants to keep with the project. `type` is a small enum
+  // ('estimate' | 'area') and `data` carries the full JSON payload so
+  // the shape can evolve without a schema migration.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS project_measurements (
+      id          BIGSERIAL PRIMARY KEY,
+      project_id  BIGINT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      type        TEXT NOT NULL,
+      name        TEXT,
+      data        TEXT NOT NULL,
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_measurements_saved_project ON project_measurements(project_id)`);
 }
 
 // pg returns BIGSERIAL ids as JS strings (numbers >2^53 can't be JS
@@ -322,6 +338,11 @@ export async function getProject(id) {
        FROM files f WHERE f.project_id = $1 ORDER BY f.uploaded_at DESC`,
     [id]
   );
+  const mRes = await pool.query(
+    `SELECT id, type, name, data, created_at
+       FROM project_measurements WHERE project_id = $1 ORDER BY created_at DESC`,
+    [id]
+  );
   return {
     id: num(p.id),
     name: p.name,
@@ -346,7 +367,39 @@ export async function getProject(id) {
       uploaded_at: iso(f.uploaded_at),
       updated_at: iso(f.updated_at),
     })),
+    measurements: mRes.rows.map((m) => {
+      let parsed = null;
+      try { parsed = JSON.parse(m.data); } catch { /* leave null */ }
+      return {
+        id: num(m.id),
+        type: m.type,
+        name: m.name,
+        data: parsed,
+        created_at: iso(m.created_at),
+      };
+    }),
   };
+}
+
+export async function insertMeasurement(projectId, type, name, data) {
+  const res = await pool.query(
+    `INSERT INTO project_measurements (project_id, type, name, data)
+     VALUES ($1, $2, $3, $4)
+     RETURNING id, type, name, data, created_at`,
+    [projectId, String(type), name || null, JSON.stringify(data || {})]
+  );
+  const r = res.rows[0];
+  return {
+    id: num(r.id),
+    type: r.type,
+    name: r.name,
+    data: JSON.parse(r.data),
+    created_at: iso(r.created_at),
+  };
+}
+
+export async function deleteMeasurementRecord(id) {
+  await pool.query(`DELETE FROM project_measurements WHERE id = $1`, [id]);
 }
 
 export async function deleteProject(id) {

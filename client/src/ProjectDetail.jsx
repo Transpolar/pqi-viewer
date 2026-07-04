@@ -105,6 +105,82 @@ export default function ProjectDetail({ projectId }) {
         </table>
       )}
 
+      <h3 style={{ marginTop: '1.5rem' }}>
+        Saved measurements
+        <span className="muted" style={{ fontWeight: 400, fontSize: '0.85rem' }}> · {(project.measurements || []).length}</span>
+      </h3>
+      {(project.measurements || []).length === 0 ? (
+        <div className="muted">No saved measurements yet — save asphalt estimates and walked areas from the mobile companion (port 8081).</div>
+      ) : (
+        <table className="files">
+          <thead>
+            <tr>
+              <th style={{ width: 90 }}>Type</th>
+              <th>Label / summary</th>
+              <th style={{ width: 200 }}>Result</th>
+              <th style={{ width: 160 }}>Saved</th>
+              <th style={{ width: 60 }}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {project.measurements.map((m) => {
+              const d = m.data || {};
+              let summary, result;
+              if (m.type === 'estimate') {
+                summary = (
+                  <>
+                    {d.startRef && d.endRef && d.startRef !== d.endRef
+                      ? <>{d.startRef} → {d.endRef}</>
+                      : (d.startRef || d.endRef || 'segment')}
+                    <br />
+                    <span className="muted" style={{ fontSize: '0.8rem' }}>
+                      L {d.length_m?.toFixed(0)} m ({d.length_source})
+                      · W {d.width_m} m · T {d.thickness_mm} mm · {d.mix} · {d.wastage_pct}% wastage
+                    </span>
+                  </>
+                );
+                result = <><strong>{d.tonnes?.toFixed(1)} t</strong><br /><span className="muted" style={{ fontSize: '0.8rem' }}>{d.volume_m3?.toFixed(1)} m³</span></>;
+              } else if (m.type === 'area') {
+                summary = (
+                  <>
+                    {d.mode === 'corner-median' ? 'stop-and-go corner-median' : 'walk-log'}
+                    <br />
+                    <span className="muted" style={{ fontSize: '0.8rem' }}>
+                      {d.corner_count} corner{d.corner_count === 1 ? '' : 's'}
+                      · perimeter {d.total_loop_m?.toFixed(1)} m
+                      {d.avg_corner_spread_m != null && <> · avg corner spread {d.avg_corner_spread_m.toFixed(1)} m</>}
+                    </span>
+                  </>
+                );
+                result = <><strong>{d.area_m2?.toFixed(1)} m²</strong>{d.area_m2 > 10000 && <><br /><span className="muted" style={{ fontSize: '0.8rem' }}>{(d.area_m2 / 10000).toFixed(3)} ha</span></>}</>;
+              } else {
+                summary = <span className="muted">unknown type</span>;
+                result = null;
+              }
+              return (
+                <tr key={m.id}>
+                  <td><strong>{m.type}</strong>{m.name && <div className="muted" style={{ fontSize: '0.8rem' }}>{m.name}</div>}</td>
+                  <td>{summary}</td>
+                  <td>{result}</td>
+                  <td className="muted">{new Date(m.created_at).toLocaleString()}</td>
+                  <td style={{ textAlign: 'right' }}>
+                    <button
+                      className="ghost danger"
+                      style={{ padding: '0.2rem 0.55rem', fontSize: '0.8rem' }}
+                      onClick={async () => {
+                        if (!confirm('Delete this saved measurement?')) return;
+                        try { await api.deleteSavedMeasurement(m.id); reload(); }
+                        catch (e) { setError(e.message); }
+                      }}
+                    >Delete</button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+
       <h3 style={{ marginTop: '1.5rem' }}>Files in this project <span className="muted" style={{ fontWeight: 400, fontSize: '0.85rem' }}>· {project.files.length}</span></h3>
       {project.files.length === 0 ? (
         <div className="muted">No files uploaded yet.</div>

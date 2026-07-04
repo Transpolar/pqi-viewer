@@ -1,13 +1,17 @@
 import React, { useEffect, useState } from 'react';
+import Home from './Home.jsx';
 import ProjectPicker from './ProjectPicker.jsx';
 import CaptureScreen from './CaptureScreen.jsx';
-import { api } from './api.js';
+import EstimateScreen from './EstimateScreen.jsx';
+import AreaWalker from './AreaWalker.jsx';
 
-// Tiny client-side router (hash-based) so the app works offline-friendly
-// and doesn't need a backend route catch-all beyond /index.html.
-// Hash forms:
-//   #/                    → project picker
-//   #/project/:id         → capture screen
+// Hash-based router (works offline-friendly, no backend catch-all
+// beyond /index.html). Routes:
+//   #/                      → Home menu
+//   #/projects              → Project picker
+//   #/project/:id           → Capture screen
+//   #/estimate              → Asphalt estimate calculator
+//   #/area                  → Walk-the-perimeter area calculator
 function useRoute() {
   const [hash, setHash] = useState(window.location.hash || '#/');
   useEffect(() => {
@@ -31,27 +35,35 @@ export default function App() {
 
   const projectMatch = hash.match(/^#\/project\/(\d+)/);
   if (projectMatch) {
-    const id = Number(projectMatch[1]);
     body = (
       <CaptureScreen
-        projectId={id}
-        onBack={() => { window.location.hash = '#/'; }}
+        projectId={Number(projectMatch[1])}
+        onBack={() => { window.location.hash = '#/projects'; }}
       />
     );
     crumb = 'capture';
-  } else {
-    body = (
-      <ProjectPicker
-        onPickProject={(p) => { window.location.hash = `#/project/${p.id}`; }}
-      />
-    );
+  } else if (hash.startsWith('#/projects')) {
+    body = <ProjectPicker onPickProject={(p) => { window.location.hash = `#/project/${p.id}`; }} />;
     crumb = 'projects';
+  } else if (hash.startsWith('#/estimate')) {
+    body = <EstimateScreen onBack={() => { window.location.hash = '#/'; }} />;
+    crumb = 'estimate';
+  } else if (hash.startsWith('#/area')) {
+    body = <AreaWalker onBack={() => { window.location.hash = '#/'; }} />;
+    crumb = 'area';
+  } else {
+    body = <Home />;
+    crumb = 'home';
   }
 
   return (
     <div className="app">
       <div className="topbar">
-        <h1>PQI Capture</h1>
+        <h1>
+          {crumb === 'home'
+            ? <span>PQI Capture</span>
+            : <a href="#/" style={{ textDecoration: 'none', color: 'inherit' }}>← PQI Capture</a>}
+        </h1>
         <span className="crumb">
           {crumb}
           {version && <> · v{version}</>}

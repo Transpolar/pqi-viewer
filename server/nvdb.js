@@ -11,6 +11,11 @@
 // into { lat, lon } here.
 
 const BASE = 'https://nvdbapiles.atlas.vegvesen.no/vegnett/api/v4';
+// Different sub-API for vegobjekter (road object attributes like width,
+// number of lanes, surface type, etc.). The /vegnett/ namespace handles
+// the road network itself; /vegobjekter/ handles the catalogue of
+// things attached to it.
+const VEGOBJ_BASE = 'https://nvdbapiles.atlas.vegvesen.no/vegobjekter';
 const HEADERS = {
   'X-Client': 'pqi-viewer',
   Accept: 'application/json',
@@ -129,6 +134,13 @@ export async function lookupPosition(lat, lon, maxDistanceMetres = 200) {
     // (typically newly built or untyped links). In that case we still
     // return the veglenkesekvens id so the UI can show something useful.
     const kortform = best?.vegsystemreferanse?.kortform || null;
+    const vs = best?.vegsystemreferanse || {};
+    // Break out the road-address components so callers can compute
+    // things like "are these two positions on the same delstrekning,
+    // and if so what's the meter delta?" (used for road-follow
+    // distance in the asphalt estimator).
+    const vegsystem = vs.vegsystem || {};
+    const strekning = vs.strekning || {};
     return {
       ref: kortform,
       kortform,
@@ -137,10 +149,123 @@ export async function lookupPosition(lat, lon, maxDistanceMetres = 200) {
       lon: point?.lon ?? null,
       distance_m: best?.avstand != null ? Number(best.avstand) : null,
       kommune: best?.kommune ?? null,
+      // Structured address so downstream code can compare segments.
+      vegkategori:  vegsystem.vegkategori ?? null,
+      vegfase:      vegsystem.fase        ?? null,
+      vegnummer:    vegsystem.nummer      ?? null,
+      strekning:    strekning.strekning   ?? null,
+      delstrekning: strekning.delstrekning ?? null,
+      meter:        strekning.meter != null ? Number(strekning.meter) : null,
     };
   } catch (e) {
     return { error: String(e.message || e) };
   }
+}
+
+// Query NVDB for road width at a vegsystemreferanse.
+//
+// Catalogue facts (verified against datakatalog v1):
+//
+//   VT 838 = "Vegbredde, beregnet"   — modern, NVDB-computed widths
+//     • egenskap 9537  "Dekkebredde"            ← we want this (wearing course)
+//     • egenskap 9538  "Dekkebredde, min"        ← skip
+//     • egenskap 9536  "Dekkebredde, maks"       ← skip
+//     • egenskap 10248 "Dekkebredde, median"     ← skip
+//     • egenskap 10249 "Dekkebredde, normal"     ← skip
+//     • egenskap 9797  "Vegbredde"               ← fallback if no Dekkebredde
+//     • egenskap 9800  "Kjørebanebredde"         ← fallback if neither above
+//
+//   VT 583 = "Vegbredde, historisk" — older, used where 838 lacks data
+//     • egenskap 5555  "Dekkebredde"
+//     • egenskap 5264  "Vegbredde, totalt"
+//     • egenskap 5556  "Kjørebanebredde"
+//
+// Per Vegvesen's own note in the catalogue, VT 838 should be preferred
+// and VT 583 is the legacy fallback.
+//
+// Returns:
+//   { width_m: number, samples: number, source: string, attribute: string }
+//   { width_m: null, tried: [...] }   — NVDB returned no useful width
+//   { error: string }                 — network / API error
+const WIDTH_VEGOBJ_TYPES = [
+  { typeId: 838, label: 'Vegbredde, beregnet' },  // modern (recommended by NVDB)
+  { typeId: 583, label: 'Vegbredde, historisk' }, // legacy fallback
+];
+
+// Property-name priority. We pick the most specific match in order.
+// Exact-equality match, NOT substring, so we don't accidentally take
+// "Dekkebredde, min" instead of "Dekkebredde".
+const WIDTH_PROP_PRIORITY = [
+  'Dekkebredde',      // wearing-course surface — what asphalt jobs pay for
+  'Vegbredde',        // full road incl. shoulders
+  'Vegbredde, totalt',
+  'Kjørebanebredde',  // sum of driving-lane widths
+];
+
+function extractWidthFromObject(obj) {
+  const props = obj?.egenskaper || [];
+  for (const wanted of WIDTH_PROP_PRIORITY) {
+    const p = props.find((x) =>
+      typeof x?.navn === 'string' && x.navn === wanted && typeof x.verdi === 'number'
+    );
+    if (p && isFinite(p.verdi) && p.verdi > 0) return { value: Number(p.verdi), navn: p.navn };
+  }
+  return null;
+}
+
+async function fetchWidthFromType(typeId, ref) {
+  // `inkluder=alle` returns metadata + egenskaper + lokasjon. We need
+  // egenskaper for the width value; `egenskaper` alone is technically
+  // enough but `alle` is what we tested and is robust against NVDB
+  // tweaking the default include set.
+  const url =
+    `${VEGOBJ_BASE}/${typeId}?vegsystemreferanse=${encodeURIComponent(ref)}` +
+    `&inkluder=alle&srid=4326`;
+  const res = await fetch(url, { headers: HEADERS });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { detail = (await res.json()).detail || detail; } catch { /* ignore */ }
+    throw new Error(`${res.status}: ${detail}`);
+  }
+  const data = await res.json();
+  const objs = data?.objekter || [];
+  const samples = []; // [{ value, navn }]
+  for (const obj of objs) {
+    const w = extractWidthFromObject(obj);
+    if (w) samples.push(w);
+  }
+  return { objektCount: objs.length, samples };
+}
+
+export async function lookupWidth(ref) {
+  if (!ref) return { error: 'ref required' };
+  const tried = [];
+  for (const { typeId, label } of WIDTH_VEGOBJ_TYPES) {
+    try {
+      const { objektCount, samples } = await fetchWidthFromType(typeId, ref);
+      tried.push({ typeId, label, objektCount, widthSamples: samples.length });
+      if (samples.length > 0) {
+        const avg = samples.reduce((a, b) => a + b.value, 0) / samples.length;
+        // Most common attribute name in the sample wins the label.
+        const counts = {};
+        for (const s of samples) counts[s.navn] = (counts[s.navn] || 0) + 1;
+        const topAttr = Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
+        console.log(`[nvdb-width] ${ref} → VT${typeId} ${topAttr}=${avg.toFixed(2)}m (${samples.length} samples, ${objektCount} objekter)`);
+        return {
+          width_m: Number(avg.toFixed(2)),
+          samples: samples.length,
+          source: `${label} · ${topAttr}`,
+          attribute: topAttr,
+          tried,
+        };
+      }
+    } catch (e) {
+      tried.push({ typeId, label, error: String(e.message || e) });
+      // Keep trying the next type unless they're all done.
+    }
+  }
+  console.log(`[nvdb-width] ${ref} → no width data; tried ${JSON.stringify(tried)}`);
+  return { width_m: null, tried };
 }
 
 // Haversine distance in metres between two WGS84 points. Used to display

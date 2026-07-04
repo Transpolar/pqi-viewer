@@ -74,4 +74,6 @@ export const api = {
     fd.append('file', file);
     return fetch(`/api/projects/${projectId}/files`, { method: 'POST', body: fd }).then(jsonOrThrow);
   },
+  deleteSavedMeasurement: (id) =>
+    fetch(`/api/measurements/saved/${id}`, { method: 'DELETE' }).then(jsonOrThrow),
 };

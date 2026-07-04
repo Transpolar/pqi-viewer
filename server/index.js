@@ -25,6 +25,8 @@ import {
   getCapturesByCode,
   appendCapture,
   deleteCapture,
+  insertMeasurement,
+  deleteMeasurementRecord,
 } from './db.js';
 import {
   assembleRoadRef,
@@ -34,14 +36,14 @@ import {
   inferDefaultKommune,
   parseRoadAndSection,
 } from './roadref.js';
-import { lookupRef, lookupRefsBatch, lookupPosition, haversineMetres } from './nvdb.js';
+import { lookupRef, lookupRefsBatch, lookupPosition, lookupWidth, haversineMetres } from './nvdb.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Bump this when you change anything user-visible. Surfaced via /api/version
 // and shown in the UI footer so the user can confirm which build is live.
-const APP_VERSION = '0.15.0';
+const APP_VERSION = '0.18.0';
 const APP_BUILT  = new Date().toISOString();
 
 const app = express();
@@ -219,6 +221,108 @@ function registerSharedApi(targetApp) {
     try {
       await deleteCapture(Number(req.params.id));
       res.json({ ok: true });
+    } catch (err) { next(err); }
+  });
+
+  // Save a mobile-app measurement (asphalt estimate or walked area)
+  // against a project. `type` is a small enum and `data` is a free-form
+  // JSON blob so the shape can evolve without a migration.
+  targetApp.post('/api/projects/:id/measurements', async (req, res, next) => {
+    try {
+      const projectId = Number(req.params.id);
+      const project = await getProject(projectId);
+      if (!project) return res.status(404).json({ error: 'project not found' });
+      const type = String(req.body?.type || '').trim();
+      if (!['estimate', 'area'].includes(type)) {
+        return res.status(400).json({ error: 'type must be "estimate" or "area"' });
+      }
+      const saved = await insertMeasurement(
+        projectId, type,
+        req.body?.name || null,
+        req.body?.data || {},
+      );
+      console.log(`[measurement] saved ${type} to project ${projectId}: ${saved.name || '(unnamed)'}`);
+      res.json(saved);
+    } catch (err) { next(err); }
+  });
+
+  targetApp.delete('/api/measurements/saved/:id', async (req, res, next) => {
+    try {
+      await deleteMeasurementRecord(Number(req.params.id));
+      res.json({ ok: true });
+    } catch (err) { next(err); }
+  });
+
+  // Road width at a vegsystemreferanse. Tries Dekkebredde first, falls
+  // back to total Vegbredde. Used by the mobile estimate screen to
+  // pre-fill the width field once both pins are placed.
+  targetApp.get('/api/road-width', async (req, res, next) => {
+    try {
+      const ref = req.query.vegsystemreferanse;
+      if (!ref) return res.status(400).json({ error: 'vegsystemreferanse required' });
+      const result = await lookupWidth(ref);
+      if (result.error) return res.status(502).json({ error: result.error });
+      res.json(result);
+    } catch (err) { next(err); }
+  });
+
+  // Road-following distance between two lat/lon points using NVDB
+  // meter values along the same delstrekning. Falls back to null for
+  // the road distance (client uses haversine) when the two positions
+  // aren't on the same segment — a v2 could hit a routing API for
+  // multi-segment cases, but for a single-job "start / end of paving"
+  // pick this covers the common case.
+  targetApp.post('/api/road-distance', async (req, res, next) => {
+    try {
+      const sLat = Number(req.body?.startLat);
+      const sLon = Number(req.body?.startLon);
+      const eLat = Number(req.body?.endLat);
+      const eLon = Number(req.body?.endLon);
+      if (![sLat, sLon, eLat, eLon].every((v) => Number.isFinite(v))) {
+        return res.status(400).json({ error: 'startLat, startLon, endLat, endLon (numbers) required' });
+      }
+      const [startPos, endPos] = await Promise.all([
+        lookupPosition(sLat, sLon),
+        lookupPosition(eLat, eLon),
+      ]);
+      const straight_m = haversineMetres(sLat, sLon, eLat, eLon);
+
+      if (startPos.error || endPos.error) {
+        return res.json({
+          straight_m,
+          road_m: null,
+          sameSegment: false,
+          startRef: startPos.error ? null : startPos.kortform,
+          endRef:   endPos.error   ? null : endPos.kortform,
+          reason: startPos.error || endPos.error,
+        });
+      }
+
+      const sameSegment =
+        startPos.vegkategori === endPos.vegkategori &&
+        startPos.vegnummer   === endPos.vegnummer &&
+        startPos.strekning   === endPos.strekning &&
+        startPos.delstrekning === endPos.delstrekning;
+
+      let road_m = null;
+      let reason = null;
+      if (sameSegment && startPos.meter != null && endPos.meter != null) {
+        road_m = Math.abs(endPos.meter - startPos.meter);
+      } else {
+        reason = sameSegment
+          ? 'meter value missing on one endpoint'
+          : 'endpoints are on different road segments (multi-segment routing not implemented)';
+      }
+
+      console.log(`[road-distance] ${startPos.kortform} → ${endPos.kortform}: straight ${straight_m.toFixed(1)} m, road ${road_m != null ? road_m.toFixed(1) + ' m' : 'n/a (' + reason + ')'}`);
+      res.json({
+        straight_m,
+        road_m,
+        sameSegment,
+        startRef: startPos.kortform,
+        endRef:   endPos.kortform,
+        reason,
+      });
     } catch (err) { next(err); }
   });
 
