@@ -11,8 +11,12 @@ Runs as either:
 - an Azure Container App with a managed Postgres backend (one-shot
   Cloud Shell deploy).
 
-Ships with a **mobile companion app** on a second port for the operator's
-phone — see the [Mobile companion](#mobile-companion) section.
+Ships with a **mobile companion app** on a second port for the
+operator's phone with three field tools — Capture (tie a measurement
+point to an NVDB road reference), Estimate (road-length + tonnage
+between two points), and AreaWalker (walk-the-perimeter area
+measurement with GPS corner-median averaging). See the
+[Mobile companion](#mobile-companion) section.
 
 ![PQI Viewer — demo file loaded, map + table](docs/demo-e6-svinesund.png)
 
@@ -177,34 +181,98 @@ npm run dev          # http://localhost:5173 (proxies /api → :8080)
 
 ## Mobile companion
 
-A phone-friendly capture flow lives on the same container image on
-**port 8081** (Azure publishes it as a separate Container App with its
-own HTTPS URL — required so browser geolocation works without extra
-setup).
+A phone-friendly bundle lives on the same container image on **port
+8081** (Azure publishes it as a separate Container App with its own
+HTTPS URL — required so browser geolocation works without extra
+setup). The home screen has three tools:
 
 ![PQI Capture — mobile capture screen on the svinesund project](docs/mobile-capture.png)
 
-Field workflow:
+### Capture
 
-1. Phone opens the mobile URL (`http://pqi-host:8081/` locally, or the
-   `mobileAppUrl` from `deploy.sh` on Azure), picks or creates a project.
-2. Kartverket topo map centres on the browser's geolocation; the marker
-   is **draggable** so the operator can nudge it to where the
-   measurement will actually happen.
-3. Tap **Save capture**. The server reverse-looks-up that lat/lon
+The primary field flow — tie a physical measurement point to a
+`vegsystemreferanse`.
+
+1. Phone opens the mobile URL, picks or creates a project.
+2. Kartverket topo map centres on the browser's geolocation; a live
+   blue dot + accuracy ring update as the operator walks. The capture
+   pin is **draggable** independently, and a **⌖ My location** button
+   snaps it back to the live position.
+3. As the operator moves, "Your road" shows the road they're currently
+   on (debounced reverse-NVDB, 5 m / 1 s throttle). After each pin
+   drag, "Marker road" shows the road the pin will save against.
+4. Tap **Save capture**. The server reverse-looks-up the lat/lon
    against NVDB and mints the next per-project 2-digit code (`00`,
    `01`, …). A modal shows the code in big text.
-4. Operator types the code into the PQI device's **Beskrivelse1** cell,
+5. Operator types the code into the PQI device's **Beskrivelse1** cell,
    then takes the asphalt density measurement.
-5. Back at base: upload the `.pqidat` into the same project from the
+6. Back at base: upload the `.pqidat` into the same project from the
    desktop UI. The server joins each row to its capture by the
    Beskrivelse1 code and pre-fills `Sted på veien`, `Beskrivelse2` and
    `GPS` from the capture's resolved NVDB position. Rows whose code
    doesn't match a capture are imported unchanged.
 
-The desktop and mobile bundles share the same Postgres, the same NVDB
-client, and the same projects/captures REST API — they just present
-two different UIs from the same Node process.
+### Estimate (road-length + tonnage)
+
+Measure a stretch of road and get a tonnage estimate for a given
+thickness and material density.
+
+- Tap two points on the map (or use "start here" / "end here" to pull
+  in your live position). The client computes straight-line distance
+  via haversine.
+- If both endpoints land on the same NVDB section (`kategori`,
+  `nummer`, `strekning`, `delstrekning`), the server also returns a
+  **road-follow** length using the meter delta from
+  `vegsystemreferanse` — shown in green next to the straight-line
+  number so you can see how much the road bends between the two
+  points. Multi-segment routing (crossing section boundaries) isn't
+  implemented yet; those cases fall back to straight-line for the
+  tonnage math.
+- Adjust **width**, **thickness**, and **density**. Result panel shows
+  the road length, planar area, volume, and tonnage.
+- 💾 **Save to project** stores the estimate against a project so it
+  shows up on the desktop's Projects → detail page.
+
+### AreaWalker (walked polygon)
+
+Measure the area of an irregular patch by physically walking its
+outline.
+
+- **Corner mode (default).** Stand at each corner, tap 📍 **Save
+  corner**. The phone collects up to 12 qualified GPS fixes over up to
+  15 s and stores the **median** as one point. Quality gates on every
+  incoming fix: accuracy > 0, accuracy ≤ 10 m, timestamp < 5 s old.
+  Repeat at each corner, tap **Finish** to close the polygon.
+- **Walk-and-log mode (opt-in checkbox).** For very large or loose
+  shapes: keep the phone in your hand and walk the perimeter; each
+  qualified fix appended as a vertex.
+- Live map shows the polygon so far. The result panel reports
+  perimeter, area (m² and ha) and — in corner mode — the **average
+  per-corner spread**, so you know how tight the number is.
+- 💾 **Save to project** as with Estimate.
+
+### Saved measurements on the desktop
+
+Once an operator saves an estimate or walked area to a project, the
+desktop **Projects → detail** page shows a "Saved measurements"
+section with type-appropriate summary columns. Each entry can be
+opened, renamed, or deleted from the desktop.
+
+### GPS accuracy caveats
+
+The browser Geolocation API can't request iOS Core Location's tightest
+tiers (e.g. `kCLLocationAccuracyBestForNavigation`) — that requires a
+native shell. `enableHighAccuracy: true` is the ceiling for a PWA.
+Typical iOS Safari accuracy on a modern iPhone is 5–15 m; corner-median
+gets that down to roughly 2–5 m per corner on a quiet fix. For
+survey-grade work, use an external RTK GNSS receiver (Emlid Reach, Bad
+Elf) with a native app — outside the scope of this project.
+
+### Shared plumbing
+
+Desktop and mobile bundles share the same Postgres, the same NVDB
+client, and the same projects/captures/measurements REST API — they
+just present two different UIs from the same Node process.
 
 ## Cloud deployment (Azure Container Apps)
 
@@ -324,14 +392,19 @@ project, operator and road data that is private to the operator.)
 ├── samples/
 │   └── demo-e6-svinesund.pqidat  # fabricated demo file (safe to share)
 ├── mobile/
-│   └── client/             # phone-side Vite+React capture app
+│   └── client/             # phone-side Vite+React field tools
 │       ├── index.html
 │       ├── vite.config.js
 │       └── src/
 │           ├── main.jsx
-│           ├── App.jsx     # hash router (#/, #/p/:id)
+│           ├── App.jsx           # hash router (Home / Capture / Estimate / Area)
+│           ├── Home.jsx          # 3-tile menu
 │           ├── ProjectPicker.jsx
 │           ├── CaptureScreen.jsx
+│           ├── EstimateScreen.jsx   # road-length + tonnage estimator
+│           ├── AreaWalker.jsx       # corner-median / walk-and-log area measurement
+│           ├── SaveToProjectModal.jsx
+│           ├── geo.js               # haversine, polygon area, formatting helpers
 │           ├── api.js
 │           └── styles.css
 ├── server/
@@ -370,8 +443,19 @@ project, operator and road data that is private to the operator.)
 | POST   | `/api/measurements/:id/set-gps`       | Assign explicit `{lat, lon}` to one row. |
 | GET    | `/api/files/:id/road-positions`       | NVDB lookup for every row (no mutation). |
 | POST   | `/api/files/:id/snap-all`             | Batch snap; body `{onlyIfDistanceOver?: number}` to skip already-close rows. |
-| GET    | `/api/road-position?lat=&lon=`        | Reverse NVDB lookup for an arbitrary map click. |
+| GET    | `/api/road-position?lat=&lon=`        | Reverse NVDB lookup for an arbitrary map click (shared by desktop + mobile). |
+| POST   | `/api/road-distance`                  | Body `{a:{lat,lon}, b:{lat,lon}}`. Returns straight-line metres plus `road_m` from NVDB when both endpoints share the same section. |
 | GET    | `/api/files/:id/export`               | Download the edited `.pqidat`. |
+| GET    | `/api/projects`                       | List projects. |
+| POST   | `/api/projects`                       | Create a project. |
+| GET    | `/api/projects/:id`                   | Project + captures + saved measurements + uploaded files. |
+| DELETE | `/api/projects/:id`                   | Delete a project (cascades to captures + saved measurements). |
+| POST   | `/api/projects/:id/files`             | Upload a `.pqidat` into a project (merges rows against captures by Beskrivelse1 code). |
+| GET    | `/api/projects/:id/captures`          | Captures for one project. |
+| POST   | `/api/projects/:id/captures`          | Create a capture (mints the next 2-digit code). |
+| DELETE | `/api/captures/:id`                   | Delete one capture. |
+| POST   | `/api/projects/:id/measurements`      | Save an estimate or walked area (body `{type, name, data}`). |
+| DELETE | `/api/measurements/saved/:id`         | Delete one saved measurement. |
 
 ## Privacy / data handling
 
